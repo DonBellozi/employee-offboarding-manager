@@ -275,13 +275,25 @@
     <summary>Не удалось сопоставить участников группы — {{ group_sync_summary.issues|length }}</summary>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Участник AD</th><th>Логин</th><th>Причина</th></tr></thead>
+        <thead><tr><th>Участник AD</th><th>Логин</th><th>Причина</th><th>Действия</th></tr></thead>
         <tbody>
         {% for issue in group_sync_summary.issues %}
         <tr>
           <td>{{ issue.display_name or '–' }}</td>
           <td>{{ issue.ad_login or '–' }}</td>
           <td>{{ issue.reason }}</td>
+          <td>
+            <form method="post"
+                  action="/settings/techexpert/group-member/remove"
+                  onsubmit="return confirm('Удалить этого участника из группы Техэксперта в AD?');">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <input type="hidden" name="ad_login" value="{{ issue.ad_login }}">
+              <input type="hidden" name="ad_object_guid" value="{{ issue.ad_object_guid or '' }}">
+              <button class="button danger small" type="submit">
+                Удалить из группы
+              </button>
+            </form>
+          </td>
         </tr>
         {% endfor %}
         </tbody>

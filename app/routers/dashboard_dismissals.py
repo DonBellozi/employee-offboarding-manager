@@ -41,7 +41,13 @@ from app.routers.employees import (
     _dismissal_journal_item,
     _provisioning_journal_item,
 )
-from app.security import get_current_user, get_or_create_csrf, validate_csrf
+from app.security import (
+    get_current_user,
+    get_or_create_csrf,
+    require_operator,
+    validate_csrf,
+)
+from app.services.ad_reactivation_alerts import ADReactivationAlertService
 from app.services.upcoming_dismissals import (
     DEFERRAL_ACTION,
     UpcomingDismissalService,
@@ -1304,6 +1310,12 @@ def dashboard(
             )
         ).all()
     )
+    for alert in ad_reactivation_alerts:
+        try:
+            candidates = json.loads(alert.candidates_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            candidates = []
+        alert.candidate_rows = candidates if isinstance(candidates, list) else []
     zimbra_attention_actions = list(
         db.scalars(
             select(ZimbraEmploymentAction)
@@ -1352,6 +1364,14 @@ def dashboard(
             new_employee_groups=new_employee_groups,
             employee_message=request.query_params.get("employee_message", ""),
             employee_error=employee_error,
+            attention_message=request.query_params.get(
+                "attention_message",
+                "",
+            ),
+            attention_error=request.query_params.get(
+                "attention_error",
+                "",
+            ),
             upcoming_dismissals=upcoming,
             dismissal_message=request.query_params.get(
                 "dismissal_message",
@@ -1394,6 +1414,108 @@ def upcoming_dismissals_fragment(
             dismissal_error=dismissal_error,
         ),
     )
+
+
+@router.post("/ad-reactivation-alerts/{alert_id}/refresh")
+def refresh_reactivated_ad(
+    alert_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_operator(request)
+    try:
+        alert, candidates = ADReactivationAlertService(
+            settings,
+            db,
+        ).refresh(alert_id=alert_id, actor=current.username)
+        message = (
+            f"{alert.fio or alert.ad_login}: найдено учетных записей AD — "
+            f"{len(candidates)}"
+        )
+        return RedirectResponse(
+            f"/?attention_message={quote_plus(message)}#operator-attention",
+            status_code=303,
+        )
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(
+            f"/?attention_error={quote_plus(str(exc))}#operator-attention",
+            status_code=303,
+        )
+
+
+@router.post("/ad-reactivation-alerts/{alert_id}/restore")
+def restore_reactivated_ad(
+    alert_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_operator(request)
+    try:
+        alert = ADReactivationAlertService(
+            settings,
+            db,
+        ).restore(alert_id=alert_id, actor=current.username)
+        message = (
+            "DRY_RUN: учетная запись AD не изменена"
+            if settings.dry_run
+            else f"AD восстановлен для {alert.fio or alert.ad_login}"
+        )
+        return RedirectResponse(
+            f"/?attention_message={quote_plus(message)}#operator-attention",
+            status_code=303,
+        )
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(
+            f"/?attention_error={quote_plus(str(exc))}#operator-attention",
+            status_code=303,
+        )
+
+
+@router.post("/ad-reactivation-alerts/{alert_id}/restore-candidate")
+def restore_reactivated_ad_candidate(
+    alert_id: int,
+    request: Request,
+    ad_login: str = Form(""),
+    ad_object_guid: str = Form(""),
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_operator(request)
+    try:
+        alert = ADReactivationAlertService(
+            settings,
+            db,
+        ).restore_candidate(
+            alert_id=alert_id,
+            ad_login=ad_login,
+            ad_object_guid=ad_object_guid,
+            actor=current.username,
+        )
+        message = (
+            "DRY_RUN: учетная запись AD не изменена"
+            if settings.dry_run
+            else f"AD восстановлен для {alert.fio or alert.ad_login}"
+        )
+        return RedirectResponse(
+            f"/?attention_message={quote_plus(message)}#operator-attention",
+            status_code=303,
+        )
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(
+            f"/?attention_error={quote_plus(str(exc))}#operator-attention",
+            status_code=303,
+        )
 
 
 @router.post("/employees/arrivals/not-required")

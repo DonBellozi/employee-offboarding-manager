@@ -24,6 +24,7 @@ from app.models_dismissal_lifecycle import (
     FinalDismissalBlockTarget,
 )
 from app.services.ad import ActiveDirectoryService
+from app.services.ad_reactivation_alerts import ADReactivationAlertService
 from app.services.hr_registry import (
     reconciliation_status_for,
     worker_requires_active_accounts,
@@ -54,6 +55,7 @@ SYSTEM_LABELS = {
 RETRY_DELAYS_MINUTES = (1, 2, 5, 10, 15, 30, 60)
 POST_RECONCILE_ACTION = "final_dismissal_post_reconcile"
 POST_RECONCILE_RETRY_MINUTES = 5
+AD_REACTIVATION_AUTO_DAYS = 14
 
 
 def utcnow() -> datetime:
@@ -1111,7 +1113,7 @@ class FinalDismissalLifecycleService:
         }
 
     def _create_reactivation_alerts(self) -> None:
-        """Не включать AD обратно, а зафиксировать «уволенный воскрес»."""
+        """Восстановить недавний возврат или передать решение оператору."""
         personnel = PersonnelStructureService(self.db)
         completed_ad_targets = list(
             self.db.execute(
@@ -1124,29 +1126,93 @@ class FinalDismissalLifecycleService:
                     FinalDismissalBlockTarget.system == "ad",
                     FinalDismissalBlockTarget.status.in_(SUCCESS_TARGET_STATUSES),
                 )
+                .order_by(FinalDismissalBlockRun.id.desc())
             ).all()
         )
+        seen_workers: set[str] = set()
+        auto_restore_ids: list[int] = []
         for run, target in completed_ad_targets:
-            if not personnel.active_anywhere(run.worker_key):
+            if run.worker_key in seen_workers:
                 continue
+            seen_workers.add(run.worker_key)
             alert = self.db.scalar(
                 select(ADReactivationAlert).where(
                     ADReactivationAlert.worker_key == run.worker_key
                 )
             )
+            if not personnel.active_anywhere(run.worker_key):
+                if alert is not None and alert.status == "open":
+                    alert.status = "resolved"
+                    alert.resolution = "inactive_again"
+                    alert.resolved_by = "system"
+                    alert.resolved_at = utcnow()
+                    alert.last_error = ""
+                    alert.updated_at = utcnow()
+                continue
             if alert is None:
-                alert = ADReactivationAlert(worker_key=run.worker_key)
+                alert = ADReactivationAlert(
+                    worker_key=run.worker_key,
+                    block_run_id=run.id,
+                    dismissal_date=run.dismissal_date,
+                    ad_login=target.target_identifier,
+                    ad_object_guid=target.stable_id,
+                )
                 self.db.add(alert)
+                self.db.flush()
+            elif alert.block_run_id != run.id:
+                alert.block_run_id = run.id
+                alert.dismissal_date = run.dismissal_date
+                alert.ad_login = target.target_identifier
+                alert.ad_object_guid = target.stable_id
+                alert.status = "open"
+                alert.resolution = ""
+                alert.resolved_by = ""
+                alert.resolved_at = None
+                alert.last_error = ""
+                alert.candidates_json = "[]"
+                alert.last_checked_at = None
+            elif alert.status != "open":
+                # Решение оператора действует для конкретного эпизода
+                # увольнения и не сбрасывается каждым фоновым циклом.
+                continue
             alert.fio = run.fio
-            alert.ad_login = target.target_identifier
-            alert.ad_object_guid = target.stable_id
+            alert.dismissal_date = run.dismissal_date
+            if not alert.ad_login:
+                alert.ad_login = target.target_identifier
+            if not alert.ad_object_guid:
+                alert.ad_object_guid = target.stable_id
             alert.status = "open"
-            alert.details = (
-                "Работник снова активен хотя бы в одной организации после "
-                "автоматической блокировки AD. Автоматическое включение запрещено."
-            )
+            days_since_dismissal = (self.today - run.dismissal_date).days
+            if 0 <= days_since_dismissal <= AD_REACTIVATION_AUTO_DAYS:
+                alert.details = (
+                    "Работник вернулся в течение 14 дней после увольнения. "
+                    "Система повторно проверит кадровые данные и попытается "
+                    "восстановить прежнюю учетную запись AD."
+                )
+                if alert.last_checked_at is None:
+                    auto_restore_ids.append(alert.id)
+            else:
+                alert.details = (
+                    "После увольнения прошло больше 14 дней. Автоматическое "
+                    "включение запрещено; решение принимает оператор после "
+                    "обновления сведений AD."
+                )
             alert.updated_at = utcnow()
         self.db.commit()
+        for alert_id in auto_restore_ids:
+            try:
+                ADReactivationAlertService(
+                    self.settings,
+                    self.db,
+                ).restore(alert_id=alert_id, actor="system")
+            except Exception:
+                # Ошибка уже сохранена в предупреждении и будет показана
+                # оператору. Остальные возвраты должны продолжить обработку.
+                logger.exception(
+                    "Не удалось автоматически восстановить AD по "
+                    "предупреждению %s",
+                    alert_id,
+                )
 
 
 class FinalDismissalLifecycleWorker:

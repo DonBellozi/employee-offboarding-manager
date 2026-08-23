@@ -93,6 +93,20 @@ def ensure_compatibility_schema() -> None:
         )
         add_missing_columns(
             connection,
+            "ad_reactivation_alerts",
+            {
+                "block_run_id": "INTEGER NOT NULL DEFAULT 0",
+                "dismissal_date": "DATE",
+                "resolution": "VARCHAR(32) NOT NULL DEFAULT ''",
+                "resolved_by": "VARCHAR(256) NOT NULL DEFAULT ''",
+                "resolved_at": "DATETIME",
+                "last_error": "TEXT NOT NULL DEFAULT ''",
+                "candidates_json": "TEXT NOT NULL DEFAULT '[]'",
+                "last_checked_at": "DATETIME",
+            },
+        )
+        add_missing_columns(
+            connection,
             "preliminary_dismissal_settings",
             {
                 "imap_host": "VARCHAR(512) NOT NULL DEFAULT ''",

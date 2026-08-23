@@ -529,6 +529,39 @@ def techexpert_group_sync(
         return _redirect(error=f"Группа AD не обновлена: {exc}")
 
 
+@router.post("/settings/techexpert/group-member/remove")
+def techexpert_unmatched_group_member_remove(
+    request: Request,
+    ad_login: str = Form(...),
+    ad_object_guid: str = Form(""),
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_operator(request)
+    try:
+        config = TechExpertSettingsService(settings, db).get()
+        result = TechExpertGroupAccessService(
+            settings,
+            db,
+            config,
+        ).remove_unmatched_member(
+            ad_login=ad_login,
+            ad_object_guid=ad_object_guid,
+            actor=current.username,
+        )
+        message = (
+            "DRY_RUN: участник группы не изменён"
+            if result["state"] == "dry_run"
+            else f"{result['ad_login']} удалён из группы Техэксперта"
+        )
+        return _redirect(message=message)
+    except Exception as exc:
+        db.rollback()
+        return _redirect(error=f"Участник группы не удалён: {exc}")
+
+
 @router.post("/settings/techexpert/actualization/start")
 def techexpert_actualization_start(
     request: Request,

@@ -699,6 +699,44 @@ class ActiveDirectoryService:
             ):
                 raise RuntimeError(f"AD не включил пользователя: {conn.result.get('message') or conn.result}")
 
+    def enable_existing_user(self, dn: str) -> None:
+        """Включить существующую учетку, сохранив остальные флаги UAC."""
+
+        normalized_dn = str(dn or "").strip()
+        if not normalized_dn:
+            raise ValueError("Не передан DN учетной записи AD")
+        if self.settings.dry_run:
+            return
+        with self._service_connection() as conn:
+            conn.search(
+                normalized_dn,
+                "(objectClass=user)",
+                search_scope=BASE,
+                attributes=["userAccountControl"],
+                size_limit=1,
+            )
+            if not conn.entries:
+                raise RuntimeError("Учетная запись AD не найдена")
+            current = int(
+                self._entry_value(
+                    conn.entries[0],
+                    "userAccountControl",
+                    0,
+                )
+                or 0
+            )
+            if not current & self.UAC_ACCOUNTDISABLE:
+                return
+            enabled = current & ~self.UAC_ACCOUNTDISABLE
+            if not conn.modify(
+                normalized_dn,
+                {"userAccountControl": [(MODIFY_REPLACE, [enabled])]},
+            ):
+                raise RuntimeError(
+                    "AD не включил пользователя: "
+                    f"{conn.result.get('message') or conn.result}"
+                )
+
     def delete_user(self, dn: str) -> None:
         if self.settings.dry_run:
             return

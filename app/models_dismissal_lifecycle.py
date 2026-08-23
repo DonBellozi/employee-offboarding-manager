@@ -128,10 +128,22 @@ class ADReactivationAlert(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     worker_key: Mapped[str] = mapped_column(String(64), index=True)
+    block_run_id: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    dismissal_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     fio: Mapped[str] = mapped_column(String(512), default="")
     ad_login: Mapped[str] = mapped_column(String(320), default="")
     ad_object_guid: Mapped[str] = mapped_column(String(128), default="")
     status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    resolution: Mapped[str] = mapped_column(String(32), default="")
+    resolved_by: Mapped[str] = mapped_column(String(256), default="")
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    candidates_json: Mapped[str] = mapped_column(Text, default="[]")
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     details: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

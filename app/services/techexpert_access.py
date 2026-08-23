@@ -159,6 +159,7 @@ class TechExpertGroupAccessService:
                     issues.append(
                         {
                             "ad_login": member.username,
+                            "ad_object_guid": member.object_guid,
                             "display_name": member.display_name,
                             "reason": "Для работника найдено несколько участников группы AD",
                         }
@@ -169,6 +170,7 @@ class TechExpertGroupAccessService:
                 issues.append(
                     {
                         "ad_login": member.username,
+                        "ad_object_guid": member.object_guid,
                         "display_name": member.display_name,
                         "reason": (
                             f"Неоднозначное сопоставление по {method}"
@@ -240,3 +242,94 @@ class TechExpertGroupAccessService:
             )
         self.db.commit()
         return result
+
+    def remove_unmatched_member(
+        self,
+        *,
+        ad_login: str,
+        ad_object_guid: str,
+        actor: str,
+    ) -> dict[str, object]:
+        """Удалить только подтверждённо несопоставленного участника группы."""
+
+        if not self.source_id:
+            raise ValueError("Не выбрана организация Техэксперта")
+        group_dn = str(self.config.ad_group_dn or "").strip()
+        if not group_dn:
+            raise ValueError("Не настроена группа AD Техэксперта")
+        wanted_guid = normalize_email(ad_object_guid)
+        wanted_login = normalize_email(ad_login)
+        if not wanted_guid and not wanted_login:
+            raise ValueError("Не передан участник группы AD")
+
+        ad = ActiveDirectoryService(self.settings)
+        members = ad.group_members(group_dn)
+        targets = [
+            member
+            for member in members
+            if (
+                wanted_guid
+                and normalize_email(member.object_guid) == wanted_guid
+            )
+            or (
+                not wanted_guid
+                and normalize_email(member.username) == wanted_login
+            )
+        ]
+        if len(targets) != 1:
+            raise ValueError(
+                "Участник группы не найден или определяется неоднозначно. "
+                "Сначала обновите сведения из AD."
+            )
+        target = targets[0]
+        matched, _issues = self._match_members(members, self._records())
+        matched_keys = {
+            normalize_email(user.object_guid) or normalize_email(user.username)
+            for user in matched.values()
+        }
+        target_key = normalize_email(target.object_guid) or normalize_email(
+            target.username
+        )
+        if target_key in matched_keys:
+            raise ValueError(
+                "Участник уже сопоставлен с работником. Удаление через список "
+                "ошибок запрещено."
+            )
+
+        state = ad.remove_user_from_group(
+            target.username,
+            group_dn,
+            object_guid=target.object_guid,
+        )
+        if state != "dry_run" and ad.is_user_member_of_group(
+            target.username,
+            group_dn,
+            object_guid=target.object_guid,
+        ):
+            raise RuntimeError("AD не подтвердил удаление участника из группы")
+        self.db.add(
+            AuditLog(
+                actor=actor,
+                action="techexpert_unmatched_member_removed",
+                target=target.username,
+                result=state,
+                details=json.dumps(
+                    {
+                        "source_id": self.source_id,
+                        "ad_login": target.username,
+                        "ad_object_guid": target.object_guid,
+                        "display_name": target.display_name,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+        )
+        self.db.commit()
+        if state != "dry_run":
+            self.sync(actor=actor)
+        return {
+            "state": state,
+            "ad_login": target.username,
+            "display_name": target.display_name,
+        }
