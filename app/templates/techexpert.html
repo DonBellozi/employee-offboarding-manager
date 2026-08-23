@@ -327,23 +327,8 @@
   </form>
   <p class="muted techexpert-file-note">
     Строки 1–2 игнорируются, строка 3 — подразделение, строка 4 — заголовки.
-  </p>
-
-  <form method="post"
-        action="/settings/techexpert/actualization/{{ actualization_run.id }}/refresh-credentials"
-        enctype="multipart/form-data"
-        class="techexpert-upload-form">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <label>
-      <span>Перечитать файлы пакета</span>
-      <input type="file" name="files" accept=".xlsx" multiple required>
-    </label>
-    <button class="button secondary" type="submit">Перечитать файлы</button>
-  </form>
-  <p class="muted techexpert-file-note">
-    Приложите те же файлы, чтобы дозаполнить телефон, логин и пароль для
-    выгрузки актуального списка. Результаты сверки не пересчитываются:
-    категории, сопоставление с кадрами и состояние группы AD не меняются.
+    Телефон, логин и пароль используются для экспорта актуального списка.
+    Пароль хранится в зашифрованном виде и не показывается на странице.
   </p>
 
   {% if actualization_details.files %}
@@ -443,10 +428,15 @@
         action="/settings/techexpert/actualization/{{ actualization_run.id }}/complete"
         class="techexpert-complete-form">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button class="button secondary" type="submit"{% if actualization_run.review_count %} disabled{% endif %}>
+    <button class="button secondary" type="submit">
       Завершить пакет
     </button>
-    {% if actualization_run.review_count %}<span class="muted">Сначала разберите спорные строки.</span>{% endif %}
+    {% if actualization_run.review_count %}
+    <span class="muted">
+      Неразобранных строк: {{ actualization_run.review_count }}. Они останутся
+      в истории пакета без автоматических действий.
+    </span>
+    {% endif %}
   </form>
   {% endif %}
 

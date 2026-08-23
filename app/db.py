@@ -62,14 +62,6 @@ def ensure_compatibility_schema() -> None:
         )
         add_missing_columns(
             connection,
-            "techexpert_actualization_items",
-            {
-                "source_login": "VARCHAR(256) NOT NULL DEFAULT ''",
-                "source_password": "VARCHAR(256) NOT NULL DEFAULT ''",
-            },
-        )
-        add_missing_columns(
-            connection,
             "synology_account_states",
             {
                 "disabled_reason_code": "VARCHAR(64) NOT NULL DEFAULT ''",
@@ -160,6 +152,14 @@ def ensure_compatibility_schema() -> None:
             connection,
             "techexpert_notification_batch_items",
             {"department": "VARCHAR(512) NOT NULL DEFAULT ''"},
+        )
+        add_missing_columns(
+            connection,
+            "techexpert_actualization_items",
+            {
+                "source_login": "VARCHAR(256) NOT NULL DEFAULT ''",
+                "source_password_encrypted": "TEXT NOT NULL DEFAULT ''",
+            },
         )
 
         if "onec_additional_sources" in tables:

@@ -45,24 +45,6 @@ class UpcomingDismissalService:
     def today(self) -> date:
         return datetime.now(ZoneInfo(self.settings.app_timezone)).date()
 
-    def _completed_before_today(
-        self,
-        run: FinalDismissalBlockRun | None,
-        today: date,
-    ) -> bool:
-        if (
-            run is None
-            or run.status != "success"
-            or run.completed_at is None
-        ):
-            return False
-        completed_at = run.completed_at
-        if completed_at.tzinfo is None:
-            completed_at = completed_at.replace(tzinfo=timezone.utc)
-        return completed_at.astimezone(
-            ZoneInfo(self.settings.app_timezone)
-        ).date() < today
-
     def ensure_primary_employment_state(self) -> None:
         """Однократный backfill для основного источника после установки патча.
 
@@ -241,13 +223,19 @@ class UpcomingDismissalService:
                 deferred_until = None
 
             # Объект остается в «Ближайших увольнениях», пока не завершилась
-            # автоблокировка. Успешный объект исчезает только на следующий
-            # день и затем показывается одной итоговой строкой в журнале.
+            # автоблокировка. После успешного завершения он сразу исчезает,
+            # а в журнале появится по прежнему правилу с начала следующего дня.
             block_run = (
                 block_run_by_pair.get((worker_key, final_date))
                 if final_dismissal
                 else None
             )
+            if (
+                block_run is not None
+                and block_run.status == "success"
+                and block_run.completed_at is not None
+            ):
+                continue
             if (
                 not include_expired
                 and final_date < today
@@ -259,10 +247,6 @@ class UpcomingDismissalService:
                 if not final_dismissal:
                     continue
                 else:
-                    completed_before_today = self._completed_before_today(
-                        block_run,
-                        today,
-                    )
                     historical_before_automation = bool(
                         block_run is None
                         and (
@@ -270,7 +254,7 @@ class UpcomingDismissalService:
                             or final_date < automation_state.activated_on
                         )
                     )
-                    if completed_before_today or historical_before_automation:
+                    if historical_before_automation:
                         continue
 
             worker_records = records_by_worker.get(worker_key, [])

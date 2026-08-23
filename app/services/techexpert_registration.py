@@ -247,8 +247,36 @@ class TechExpertRegistrationService:
             raise ValueError("Учетная запись AD работника отключена")
         return user
 
+    def _is_group_member(self, user: ADDirectoryUser) -> bool:
+        return ActiveDirectoryService(self.settings).is_user_member_of_group(
+            user.username,
+            self.config.ad_group_dn,
+            object_guid=user.object_guid,
+        )
+
+    def _sync_access_marker(
+        self,
+        record: HRSourceRecord,
+        is_member: bool,
+    ) -> None:
+        if bool(record.techexpert_access) == bool(is_member):
+            return
+        record.techexpert_access = bool(is_member)
+        self.db.commit()
+
     def selected_record(self, record_id: int) -> dict[str, object]:
         record, state = self.active_record(record_id)
+        membership_state = "unknown"
+        membership_error = ""
+        ad_login = ""
+        try:
+            ad_user = self._resolve_ad(record)
+            ad_login = ad_user.username
+            is_member = self._is_group_member(ad_user)
+            membership_state = "member" if is_member else "not_member"
+            self._sync_access_marker(record, is_member)
+        except Exception as exc:
+            membership_error = str(exc)
         last_sent = self.db.scalar(
             select(TechExpertRegistrationRequest)
             .where(
@@ -263,6 +291,9 @@ class TechExpertRegistrationService:
             "state": state,
             "placements": self.placements(record),
             "last_sent": last_sent,
+            "membership_state": membership_state,
+            "membership_error": membership_error,
+            "ad_login": ad_login,
         }
 
     def prepare(
@@ -282,6 +313,13 @@ class TechExpertRegistrationService:
             raise ValueError("Выбранное кадровое назначение не найдено")
         placement = placements[placement_index]
         ad_user = self._resolve_ad(record)
+        is_member = self._is_group_member(ad_user)
+        self._sync_access_marker(record, is_member)
+        if is_member:
+            raise ValueError(
+                "Работник уже состоит в группе Техэксперта. "
+                "Повторная регистрация не требуется."
+            )
         profile = get_domain_mail_profile(
             self.db,
             self.settings,

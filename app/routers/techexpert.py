@@ -729,45 +729,6 @@ def techexpert_actualization_not_working_export(
     )
 
 
-@router.post("/settings/techexpert/actualization/{run_id}/refresh-credentials")
-async def techexpert_actualization_refresh_credentials(
-    run_id: int,
-    request: Request,
-    files: list[UploadFile] = File(...),
-    csrf: str = Form(...),
-    db: Session = Depends(get_db),
-    settings: Settings = Depends(get_settings),
-):
-    """Дозаполнить телефон, логин и пароль у уже обработанных позиций пакета.
-
-    Содержимое загруженных файлов приложение не хранит, поэтому те же файлы
-    нужно приложить повторно. Результаты сверки при этом не пересчитываются.
-    """
-    validate_csrf(request, csrf)
-    current = require_operator(request)
-    config = TechExpertSettingsService(settings, db).get()
-    try:
-        result = TechExpertActualizationService(
-            settings,
-            db,
-            config,
-        ).refresh_source_credentials(
-            run_id=run_id,
-            files=[(item.filename or "", await item.read()) for item in files],
-            actor=current.username,
-        )
-    except Exception as exc:
-        db.rollback()
-        return _redirect(error=f"Файлы не перечитаны: {exc}")
-    return _redirect(
-        message=(
-            f"Перечитано строк: {result['rows']}; "
-            f"обновлено записей: {result['updated']}; "
-            f"не сопоставлено: {result['unmatched']}"
-        )
-    )
-
-
 @router.get("/settings/techexpert/current.xlsx")
 def techexpert_current_export(
     request: Request,
@@ -789,6 +750,8 @@ def techexpert_current_export(
         headers={
             "Content-Disposition": (
                 'attachment; filename="techexpert-current-users.xlsx"'
-            )
+            ),
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
         },
     )

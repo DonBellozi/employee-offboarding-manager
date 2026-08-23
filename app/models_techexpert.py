@@ -255,11 +255,7 @@ class TechExpertActualizationFile(Base):
 
 
 class TechExpertActualizationItem(Base):
-    """Одна строка XLSX сверки Техэксперта.
-
-    Логин и пароль заполняются только по явной команде «Перечитать файлы» и
-    нужны единственному потребителю – выгрузке актуального списка.
-    """
+    """Одна исходная строка XLSX внутри операции актуализации."""
 
     __tablename__ = "techexpert_actualization_items"
     __table_args__ = (
@@ -281,7 +277,7 @@ class TechExpertActualizationItem(Base):
     source_email: Mapped[str] = mapped_column(String(320), default="")
     source_phone: Mapped[str] = mapped_column(String(128), default="")
     source_login: Mapped[str] = mapped_column(String(256), default="")
-    source_password: Mapped[str] = mapped_column(String(256), default="")
+    source_password_encrypted: Mapped[str] = mapped_column(Text, default="")
     category: Mapped[str] = mapped_column(String(32), index=True)
     reason: Mapped[str] = mapped_column(Text, default="")
     candidates_json: Mapped[str] = mapped_column(Text, default="[]")

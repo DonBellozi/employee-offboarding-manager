@@ -3,9 +3,12 @@ from __future__ import annotations
 import io
 import json
 import re
-from dataclasses import dataclass
+import base64
+import hashlib
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from cryptography.fernet import Fernet, InvalidToken
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from sqlalchemy import func, select
@@ -53,6 +56,15 @@ def safe_excel_value(value: object) -> str:
     return text
 
 
+def safe_excel_secret_value(value: object) -> str:
+    """Сохранить пароль без нормализации, но исключить формулы Excel."""
+
+    text = "" if value is None else str(value)
+    if text.startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
+
+
 def organization_email_keys(value: object, source_id: object) -> set[str]:
     """Exact email plus a safe .com/.ru alias for the configured organization."""
 
@@ -83,11 +95,8 @@ class ParsedTechExpertRow:
     position: str
     email: str
     phone: str
-    # Учетные данные Техэксперта существуют только внутри файла сверки и
-    # никогда не сохраняются в базу: синхронизация разовая, а пароль не
-    # должен оседать в SQLite и в резервных копиях.
-    login: str = ""
-    password: str = ""
+    login: str
+    password: str = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -108,6 +117,35 @@ class ActualizationAnalysisContext:
     group_error: str
 
 
+class TechExpertCredentialBox:
+    """Шифрует исходные пароли ТЭ ключом приложения."""
+
+    def __init__(self, app_secret_key: str):
+        secret = str(app_secret_key or "").encode("utf-8")
+        if not secret:
+            raise RuntimeError("APP_SECRET_KEY не задан")
+        digest = hashlib.sha256(secret).digest()
+        self._fernet = Fernet(base64.urlsafe_b64encode(digest))
+
+    def encrypt(self, value: str) -> str:
+        text = str(value or "")
+        if not text:
+            return ""
+        return self._fernet.encrypt(text.encode("utf-8")).decode("ascii")
+
+    def decrypt(self, value: str) -> str:
+        text = str(value or "")
+        if not text:
+            return ""
+        try:
+            return self._fernet.decrypt(text.encode("ascii")).decode("utf-8")
+        except (InvalidToken, ValueError, UnicodeError) as exc:
+            raise RuntimeError(
+                "Не удалось расшифровать пароль Техэксперта. "
+                "Проверьте, что APP_SECRET_KEY не менялся."
+            ) from exc
+
+
 class TechExpertActualizationService:
     """Первичная и редкая сверка файлов с кадровой организацией и AD."""
 
@@ -120,6 +158,7 @@ class TechExpertActualizationService:
         self.settings = settings
         self.db = db
         self.config = config
+        self.credential_box = TechExpertCredentialBox(settings.app_secret_key)
 
     @property
     def source_id(self) -> str:
@@ -162,8 +201,8 @@ class TechExpertActualizationService:
                 "position": {"должность"},
                 "email": {"email", "электроннаяпочта", "почта"},
                 "phone": {"телефон", "тел"},
-                "login": {"логин", "login", "имяпользователя", "пользователь"},
-                "password": {"пароль", "password", "пасс"},
+                "login": {"логин", "username", "имяпользователя"},
+                "password": {"пароль", "password"},
             }
             columns: dict[str, int] = {}
             for column in range(1, sheet.max_column + 1):
@@ -218,13 +257,19 @@ class TechExpertActualizationService:
                             if columns.get("login")
                             else ""
                         ),
-                        password=normalize_text(
-                            sheet.cell(
+                        password=(
+                            ""
+                            if not columns.get("password")
+                            or sheet.cell(
                                 row_number,
-                                columns.get("password", 0),
-                            ).value
-                            if columns.get("password")
-                            else ""
+                                columns["password"],
+                            ).value is None
+                            else str(
+                                sheet.cell(
+                                    row_number,
+                                    columns["password"],
+                                ).value
+                            )
                         ),
                     )
                 )
@@ -639,7 +684,9 @@ class TechExpertActualizationService:
                 source_email=source.email,
                 source_phone=source.phone,
                 source_login=source.login,
-                source_password=source.password,
+                source_password_encrypted=self.credential_box.encrypt(
+                    source.password
+                ),
                 **analysis,
             )
             self.db.add(item)
@@ -771,6 +818,8 @@ class TechExpertActualizationService:
                 position=item.source_position,
                 email=normalize_email(item.source_email),
                 phone=item.source_phone,
+                login=item.source_login,
+                password="",
             )
             analysis = self._analyze_source(source, context)
             self._apply_analysis(item, analysis)
@@ -968,8 +1017,6 @@ class TechExpertActualizationService:
         run = self.get_run(run_id)
         if run.status != "open":
             return
-        if run.review_count:
-            raise ValueError("Сначала разберите все строки, требующие проверки")
         run.status = "completed"
         run.completed_at = utcnow()
         run.updated_at = utcnow()
@@ -985,6 +1032,7 @@ class TechExpertActualizationService:
                         "total": run.total_count,
                         "working": run.working_count,
                         "not_working": run.not_working_count,
+                        "review": run.review_count,
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -1055,104 +1103,7 @@ class TechExpertActualizationService:
             sheet.column_dimensions[column].width = width
         return self._finish_workbook(workbook)
 
-    def refresh_source_credentials(
-        self,
-        *,
-        run_id: int,
-        files: list[tuple[str, bytes]],
-        actor: str,
-    ) -> dict[str, int]:
-        """Дозаполнить телефон, логин и пароль у уже обработанных позиций.
-
-        Содержимое загруженных файлов приложение не хранит, поэтому файлы
-        приходится приложить повторно. Ничего кроме трех полей не меняется:
-        категории, сопоставление с кадрами и состояние группы AD остаются
-        такими, какими их посчитала первичная сверка.
-        """
-        run = self.get_run(run_id)
-        if not files:
-            raise ValueError("Приложите файлы сверки Техэксперта")
-
-        items = list(
-            self.db.scalars(
-                select(TechExpertActualizationItem).where(
-                    TechExpertActualizationItem.run_id == run.id
-                )
-            ).all()
-        )
-        by_email: dict[str, list[TechExpertActualizationItem]] = {}
-        by_fio: dict[str, list[TechExpertActualizationItem]] = {}
-        for item in items:
-            email = normalize_email(item.source_email)
-            if email:
-                by_email.setdefault(email, []).append(item)
-            if item.normalized_fio:
-                by_fio.setdefault(item.normalized_fio, []).append(item)
-
-        rows = 0
-        updated = 0
-        unmatched = 0
-        for _filename, payload in files:
-            parsed = self.parse_xlsx(payload)
-            for source in parsed.rows:
-                rows += 1
-                targets = by_email.get(normalize_email(source.email)) or []
-                if not targets:
-                    targets = by_fio.get(normalize_fio(source.fio)) or []
-                if not targets:
-                    unmatched += 1
-                    continue
-                for item in targets:
-                    changed = False
-                    # Пустое значение в файле не затирает уже известное.
-                    for field, value in (
-                        ("source_phone", source.phone),
-                        ("source_login", source.login),
-                        ("source_password", source.password),
-                    ):
-                        if value and getattr(item, field) != value:
-                            setattr(item, field, value)
-                            changed = True
-                    updated += int(changed)
-
-        self.db.add(
-            AuditLog(
-                actor=actor,
-                action="techexpert_actualization_credentials_refreshed",
-                target=f"run:{run.id}",
-                result="success",
-                details=json.dumps(
-                    {
-                        "files": len(files),
-                        "rows": rows,
-                        "updated": updated,
-                        "unmatched": unmatched,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
-            )
-        )
-        self.db.commit()
-        return {"rows": rows, "updated": updated, "unmatched": unmatched}
-
-    def _source_credentials(self) -> dict[str, TechExpertActualizationItem]:
-        """Последние известные учетные данные Техэксперта по worker_key."""
-        items = list(
-            self.db.scalars(
-                select(TechExpertActualizationItem)
-                .where(TechExpertActualizationItem.worker_key != "")
-                .order_by(TechExpertActualizationItem.id)
-            ).all()
-        )
-        result: dict[str, TechExpertActualizationItem] = {}
-        for item in items:
-            # Более поздняя сверка перекрывает раннюю.
-            result[item.worker_key] = item
-        return result
-
     def export_current(self) -> bytes:
-        credentials = self._source_credentials()
         records = list(
             self.db.scalars(
                 select(HRSourceRecord)
@@ -1163,6 +1114,35 @@ class TechExpertActualizationService:
                 .order_by(HRSourceRecord.fio)
             ).all()
         )
+        worker_keys = {record.worker_key for record in records}
+        source_fields: dict[str, dict[str, str]] = {}
+        if worker_keys:
+            source_items = list(
+                self.db.scalars(
+                    select(TechExpertActualizationItem)
+                    .where(
+                        TechExpertActualizationItem.worker_key.in_(worker_keys)
+                    )
+                    .order_by(TechExpertActualizationItem.id.desc())
+                ).all()
+            )
+            for item in source_items:
+                values = source_fields.setdefault(
+                    item.worker_key,
+                    {"phone": "", "login": "", "password": ""},
+                )
+                if not values["phone"] and item.source_phone:
+                    values["phone"] = item.source_phone
+                if not values["login"] and item.source_login:
+                    values["login"] = item.source_login
+                if (
+                    not values["password"]
+                    and item.source_password_encrypted
+                ):
+                    values["password"] = self.credential_box.decrypt(
+                        item.source_password_encrypted
+                    )
+
         grouped: dict[str, list[tuple[HRSourceRecord, str]]] = {}
         for record in records:
             snapshot = placement_snapshot(record)
@@ -1215,34 +1195,39 @@ class TechExpertActualizationService:
                 sorted(grouped[department], key=lambda item: item[0].fio.casefold()),
                 1,
             ):
-                # Кадровая часть – из 1С, учетные данные – из файлов сверки.
-                source = credentials.get(record.worker_key)
                 values = [
                     sequence,
                     record.fio,
                     position,
                     record.corporate_email,
-                    getattr(source, "source_phone", ""),
-                    getattr(source, "source_login", ""),
-                    getattr(source, "source_password", ""),
+                    source_fields.get(record.worker_key, {}).get("phone", ""),
+                    source_fields.get(record.worker_key, {}).get("login", ""),
+                    source_fields.get(record.worker_key, {}).get("password", ""),
                 ]
                 for column, value in enumerate(values, 1):
+                    if column == 7:
+                        excel_value = safe_excel_secret_value(value)
+                    else:
+                        excel_value = (
+                            value
+                            if isinstance(value, int)
+                            else safe_excel_value(value)
+                        )
                     sheet.cell(
                         row_number,
                         column,
-                        value if isinstance(value, int) else safe_excel_value(value),
+                        excel_value,
                     )
                 row_number += 1
-        widths = {
+        for column, width in {
             "A": 10,
             "B": 42,
             "C": 44,
             "D": 34,
             "E": 22,
-            "F": 26,
-            "G": 26,
-        }
-        for column, width in widths.items():
+            "F": 24,
+            "G": 24,
+        }.items():
             sheet.column_dimensions[column].width = width
         return self._finish_workbook(workbook)
 

@@ -188,6 +188,21 @@
     Новое подтверждение отправит повторную заявку.
   </div>
   {% endif %}
+  {% if selected.membership_state == 'member' %}
+  <div class="alert success">
+    Работник уже состоит в группе Техэксперта{% if selected.ad_login %}
+    (AD: {{ selected.ad_login }}){% endif %}. Повторная регистрация не требуется.
+  </div>
+  {% elif selected.membership_state == 'not_member' %}
+  <div class="alert warning">
+    Работник не состоит в группе Техэксперта. Можно подготовить регистрацию.
+  </div>
+  {% elif selected.membership_error %}
+  <div class="alert warning">
+    Не удалось проверить группу AD: {{ selected.membership_error }}.
+    Перед созданием письма система попробует ещё раз.
+  </div>
+  {% endif %}
   {% if not record.corporate_email %}
   <div class="alert error">В кадровой выгрузке нет корпоративного e-mail. Отправка недоступна.</div>
   {% endif %}
@@ -215,7 +230,7 @@
       <dt>Телефон из 1С</dt><dd>{{ record.mobile_phone or 'Не указан' }}</dd>
       <dt>Получатель запроса</dt><dd>{{ techexpert.recipient_email }}</dd>
     </dl>
-    <button class="button" type="submit"{% if not record.corporate_email %} disabled{% endif %}>
+    <button class="button" type="submit"{% if not record.corporate_email or selected.membership_state == 'member' %} disabled{% endif %}>
       Подготовить письмо
     </button>
   </form>
