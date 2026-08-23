@@ -99,6 +99,8 @@ def _page_context(
     active_run = None
     active_run_details = None
     group_sync_summary: dict[str, object] = {}
+    page_error = error or request.query_params.get("error", "")
+    group_member_mapping = None
     if config.source_domain:
         actualization = TechExpertActualizationService(settings, db, config)
         access_summary = actualization.access_summary()
@@ -128,6 +130,60 @@ def _page_context(
                     group_sync_summary = parsed
             except (TypeError, json.JSONDecodeError):
                 group_sync_summary = {}
+        match_login = request.query_params.get("match_ad_login", "").strip()
+        match_guid = request.query_params.get(
+            "match_ad_object_guid",
+            "",
+        ).strip()
+        if match_login or match_guid:
+            selected_issue = next(
+                (
+                    issue
+                    for issue in group_sync_summary.get("issues", [])
+                    if isinstance(issue, dict)
+                    and (
+                        (
+                            match_guid
+                            and str(
+                                issue.get("ad_object_guid") or ""
+                            ).casefold()
+                            == match_guid.casefold()
+                        )
+                        or (
+                            not match_guid
+                            and str(
+                                issue.get("ad_login") or ""
+                            ).casefold()
+                            == match_login.casefold()
+                        )
+                    )
+                ),
+                {},
+            )
+            match_query = request.query_params.get("match_q", "").strip()
+            if not match_query:
+                match_query = str(
+                    selected_issue.get("display_name") or ""
+                ).strip()
+            results: list[dict[str, object]] = []
+            try:
+                if match_query:
+                    results = TechExpertGroupAccessService(
+                        settings,
+                        db,
+                        config,
+                    ).search_active_workers(match_query)
+            except Exception as exc:
+                page_error = str(exc)
+            group_member_mapping = {
+                "ad_login": match_login,
+                "ad_object_guid": match_guid,
+                "display_name": str(
+                    selected_issue.get("display_name") or match_login
+                ),
+                "query": match_query,
+                "results": results,
+            }
     history = list(
         db.scalars(
             select(TechExpertActualizationRun)
@@ -153,9 +209,10 @@ def _page_context(
         "smtp_configured": bool(settings.smtp_host),
         "app_timezone": settings.app_timezone,
         "message": request.query_params.get("message", ""),
-        "error": error or request.query_params.get("error", ""),
+        "error": page_error,
         "access_summary": access_summary,
         "group_sync_summary": group_sync_summary,
+        "group_member_mapping": group_member_mapping,
         "actualization_run": active_run,
         "actualization_details": active_run_details,
         "actualization_history": history,
@@ -560,6 +617,41 @@ def techexpert_unmatched_group_member_remove(
     except Exception as exc:
         db.rollback()
         return _redirect(error=f"Участник группы не удалён: {exc}")
+
+
+@router.post("/settings/techexpert/group-member/match")
+def techexpert_unmatched_group_member_match(
+    request: Request,
+    record_id: int = Form(...),
+    ad_login: str = Form(...),
+    ad_object_guid: str = Form(""),
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_operator(request)
+    try:
+        config = TechExpertSettingsService(settings, db).get()
+        result = TechExpertGroupAccessService(
+            settings,
+            db,
+            config,
+        ).match_unmatched_member(
+            record_id=record_id,
+            ad_login=ad_login,
+            ad_object_guid=ad_object_guid,
+            actor=current.username,
+        )
+        return _redirect(
+            message=(
+                f"{result['ad_login']} сопоставлен с работником "
+                f"{result['fio']}. Доступ к Техэксперту подтверждён."
+            )
+        )
+    except Exception as exc:
+        db.rollback()
+        return _redirect(error=f"Сопоставление не сохранено: {exc}")
 
 
 @router.post("/settings/techexpert/actualization/start")

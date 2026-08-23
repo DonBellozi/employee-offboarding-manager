@@ -283,6 +283,13 @@
           <td>{{ issue.ad_login or '–' }}</td>
           <td>{{ issue.reason }}</td>
           <td>
+            <form method="get" action="/settings/techexpert#techexpert-member-match">
+              <input type="hidden" name="match_ad_login" value="{{ issue.ad_login }}">
+              <input type="hidden" name="match_ad_object_guid" value="{{ issue.ad_object_guid or '' }}">
+              <button class="button small secondary" type="submit">
+                Сопоставить с работником
+              </button>
+            </form>
             <form method="post"
                   action="/settings/techexpert/group-member/remove"
                   onsubmit="return confirm('Удалить этого участника из группы Техэксперта в AD?');">
@@ -300,6 +307,82 @@
       </table>
     </div>
   </details>
+  {% endif %}
+
+  {% if group_member_mapping %}
+  <section class="card" id="techexpert-member-match">
+    <div class="heading-row">
+      <div>
+        <h3>Сопоставление участника AD</h3>
+        <p class="muted">
+          {{ group_member_mapping.display_name or 'Имя в AD не указано' }}
+          {% if group_member_mapping.ad_login %}
+          — {{ group_member_mapping.ad_login }}
+          {% endif %}
+        </p>
+      </div>
+      <a class="button secondary" href="/settings/techexpert">Закрыть</a>
+    </div>
+    <form method="get"
+          action="/settings/techexpert#techexpert-member-match"
+          class="techexpert-upload-form">
+      <input type="hidden" name="match_ad_login" value="{{ group_member_mapping.ad_login }}">
+      <input type="hidden" name="match_ad_object_guid" value="{{ group_member_mapping.ad_object_guid }}">
+      <label>
+        <span>Работник в кадровой выгрузке</span>
+        <input type="search"
+               name="match_q"
+               value="{{ group_member_mapping.query }}"
+               minlength="2"
+               placeholder="Введите фамилию или часть ФИО"
+               required>
+      </label>
+      <button class="button secondary" type="submit">Найти</button>
+    </form>
+
+    {% if group_member_mapping.results %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Работник</th><th>Подразделение</th><th>Должность</th><th>Действие</th></tr>
+        </thead>
+        <tbody>
+        {% for candidate in group_member_mapping.results %}
+        <tr>
+          <td>
+            <strong>{{ candidate.fio }}</strong>
+            {% if candidate.corporate_email %}
+            <div class="muted">{{ candidate.corporate_email }}</div>
+            {% endif %}
+          </td>
+          <td>{{ candidate.top_departments|join(', ') or '–' }}</td>
+          <td>{{ candidate.positions|join(', ') or '–' }}</td>
+          <td>
+            <form method="post"
+                  action="/settings/techexpert/group-member/match"
+                  onsubmit="return confirm('Сохранить выбранное сопоставление с этой учетной записью AD?');">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <input type="hidden" name="record_id" value="{{ candidate.record_id }}">
+              <input type="hidden" name="ad_login" value="{{ group_member_mapping.ad_login }}">
+              <input type="hidden" name="ad_object_guid" value="{{ group_member_mapping.ad_object_guid }}">
+              <button class="button small" type="submit">Сопоставить</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% elif group_member_mapping.query %}
+    <div class="alert warning">
+      Действующие работники по запросу не найдены. Измените ФИО и повторите поиск.
+    </div>
+    {% endif %}
+    <p class="muted">
+      Письмо о регистрации не отправляется: участник уже состоит в группе AD.
+      Система только сохранит связь с кадровым работником и подтвердит доступ.
+    </p>
+  </section>
   {% endif %}
 
   {% if not techexpert.source_domain or not techexpert.ad_group_dn %}

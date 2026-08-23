@@ -9,11 +9,13 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import AuditLog, EmailLoginMapping, HRSourceRecord
+from app.models_onec_sources import HREmploymentState
 from app.models_techexpert import TechExpertSettings
 from app.services.ad import ADDirectoryUser, ActiveDirectoryService
 
 
 DEPARTMENT_SEPARATOR = " / "
+ACTIVE_EMPLOYMENT_STATUSES = {"active", "scheduled"}
 
 
 def utcnow() -> datetime:
@@ -90,6 +92,55 @@ class TechExpertGroupAccessService:
                 )
             ).all()
         )
+
+    def search_active_workers(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+    ) -> list[dict[str, object]]:
+        """Найти действующих работников организации для ручной привязки."""
+
+        normalized_query = normalize_fio(query)
+        if len(normalized_query) < 2 or not self.source_id:
+            return []
+        active_keys = set(
+            self.db.scalars(
+                select(HREmploymentState.worker_key).where(
+                    HREmploymentState.source_id == self.source_id,
+                    HREmploymentState.status.in_(
+                        ACTIVE_EMPLOYMENT_STATUSES
+                    ),
+                    HREmploymentState.is_present.is_(True),
+                )
+            ).all()
+        )
+        result: list[dict[str, object]] = []
+        for record in self.db.scalars(
+            select(HRSourceRecord)
+            .where(
+                HRSourceRecord.source_id == self.source_id,
+                HRSourceRecord.is_present.is_(True),
+            )
+            .order_by(HRSourceRecord.fio)
+        ).all():
+            if record.worker_key not in active_keys:
+                continue
+            if normalized_query not in normalize_fio(record.fio):
+                continue
+            snapshot = placement_snapshot(record)
+            result.append(
+                {
+                    "record_id": record.id,
+                    "fio": record.fio,
+                    "corporate_email": record.corporate_email,
+                    "positions": snapshot["positions"],
+                    "top_departments": snapshot["top_departments"],
+                }
+            )
+            if len(result) >= max(1, min(int(limit), 50)):
+                break
+        return result
 
     @staticmethod
     def _add(
@@ -332,4 +383,176 @@ class TechExpertGroupAccessService:
             "state": state,
             "ad_login": target.username,
             "display_name": target.display_name,
+        }
+
+    def match_unmatched_member(
+        self,
+        *,
+        record_id: int,
+        ad_login: str,
+        ad_object_guid: str,
+        actor: str,
+    ) -> dict[str, object]:
+        """Связать несопоставленного участника группы с кадровым работником."""
+
+        if not self.source_id:
+            raise ValueError("Не выбрана организация Техэксперта")
+        group_dn = str(self.config.ad_group_dn or "").strip()
+        if not group_dn:
+            raise ValueError("Не настроена группа AD Техэксперта")
+
+        record = self.db.get(HRSourceRecord, int(record_id))
+        if (
+            record is None
+            or normalize_email(record.source_id) != self.source_id
+            or not record.is_present
+        ):
+            raise LookupError(
+                "Работник организации Техэксперта не найден в текущих кадрах"
+            )
+        employment = self.db.scalar(
+            select(HREmploymentState).where(
+                HREmploymentState.worker_key == record.worker_key,
+                HREmploymentState.source_id == self.source_id,
+            )
+        )
+        if (
+            employment is None
+            or employment.status not in ACTIVE_EMPLOYMENT_STATUSES
+            or not employment.is_present
+        ):
+            raise ValueError(
+                "Выбранный работник больше не активен в организации "
+                "Техэксперта"
+            )
+
+        wanted_guid = normalize_email(ad_object_guid)
+        wanted_login = normalize_email(ad_login)
+        if not wanted_guid and not wanted_login:
+            raise ValueError("Не передан участник группы AD")
+        ad = ActiveDirectoryService(self.settings)
+        members = ad.group_members(group_dn)
+        targets = [
+            member
+            for member in members
+            if (
+                wanted_guid
+                and normalize_email(member.object_guid) == wanted_guid
+            )
+            or (
+                not wanted_guid
+                and normalize_email(member.username) == wanted_login
+            )
+        ]
+        if len(targets) != 1:
+            raise ValueError(
+                "Участник группы не найден или определяется неоднозначно. "
+                "Сначала обновите сведения из AD."
+            )
+        target = targets[0]
+        if not target.object_guid:
+            raise ValueError(
+                "AD не вернул objectGUID участника. Надёжное сопоставление "
+                "сохранить нельзя."
+            )
+        target_key = normalize_email(target.object_guid) or normalize_email(
+            target.username
+        )
+        matched, _issues = self._match_members(members, self._records())
+        for worker_key, member in matched.items():
+            member_key = normalize_email(member.object_guid) or normalize_email(
+                member.username
+            )
+            if member_key != target_key:
+                continue
+            if worker_key != record.worker_key:
+                raise ValueError(
+                    "Эта учетная запись AD уже сопоставлена с другим "
+                    "работником"
+                )
+            result = self.sync(actor=actor)
+            return {
+                "state": "already_mapped",
+                "ad_login": target.username,
+                "fio": record.fio,
+                "issues": len(result["issues"]),
+            }
+
+        conflict = next(
+            (
+                item
+                for item in self.db.scalars(
+                    select(EmailLoginMapping).where(
+                        EmailLoginMapping.worker_key != record.worker_key
+                    )
+                ).all()
+                if normalize_email(item.ad_object_guid)
+                == normalize_email(target.object_guid)
+                or normalize_email(item.ad_login)
+                == normalize_email(target.username)
+            ),
+            None,
+        )
+        if conflict is not None:
+            raise ValueError(
+                "Эта учетная запись AD уже сохранена у другого работника"
+            )
+
+        mapping = self.db.scalar(
+            select(EmailLoginMapping).where(
+                EmailLoginMapping.worker_key == record.worker_key,
+                EmailLoginMapping.source_domain == self.source_id,
+            )
+        )
+        created = mapping is None
+        if mapping is None:
+            mapping = EmailLoginMapping(
+                worker_key=record.worker_key,
+                source_domain=self.source_id,
+                source_email=normalize_email(record.corporate_email),
+                ad_object_guid="",
+                ad_login="",
+                zimbra_id="",
+                zimbra_email="",
+                created_by=actor,
+            )
+            self.db.add(mapping)
+        previous_login = mapping.ad_login
+        previous_guid = mapping.ad_object_guid
+        if record.corporate_email:
+            mapping.source_email = normalize_email(record.corporate_email)
+        mapping.ad_login = target.username
+        mapping.ad_object_guid = target.object_guid
+        mapping.last_verified_at = utcnow()
+        mapping.updated_at = utcnow()
+        record.techexpert_access = True
+        self.db.add(
+            AuditLog(
+                actor=actor,
+                action="techexpert_group_member_mapped",
+                target=target.username,
+                result="created" if created else "updated",
+                details=json.dumps(
+                    {
+                        "source_id": self.source_id,
+                        "record_id": record.id,
+                        "worker_key": record.worker_key,
+                        "fio": record.fio,
+                        "ad_login": target.username,
+                        "ad_object_guid": target.object_guid,
+                        "previous_ad_login": previous_login,
+                        "previous_ad_object_guid": previous_guid,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+        )
+        self.db.commit()
+        result = self.sync(actor=actor)
+        return {
+            "state": "mapped",
+            "ad_login": target.username,
+            "fio": record.fio,
+            "issues": len(result["issues"]),
         }
