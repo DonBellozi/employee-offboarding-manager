@@ -294,6 +294,21 @@ class EmployeeArrivalService:
             "personal_email": personal_email,
             "preferred_domain": preferred_domain,
             "events": events,
+            "records": records,
+            "corporate_emails": list(
+                dict.fromkeys(
+                    record.corporate_email.strip().lower()
+                    for record in records
+                    if record.corporate_email.strip()
+                )
+            ),
+            "logins": list(
+                dict.fromkeys(
+                    record.login.strip().lower()
+                    for record in records
+                    if record.login.strip()
+                )
+            ),
         }
 
     def mark_not_required(
@@ -367,4 +382,50 @@ class EmployeeArrivalService:
             event.provisioning_operation_id = provisioning_operation_id
             event.decided_at = now
             event.updated_at = now
+        self.db.commit()
+
+    def mark_accounts_resolved(
+        self,
+        raw_event_ids: str,
+        *,
+        operator: str,
+        decision_details: str,
+        provisioning_operation_id: int | None = None,
+    ) -> None:
+        """Закрыть кадровое появление после принятия существующих учёток."""
+
+        context = self.registration_context(raw_event_ids)
+        now = utcnow()
+        status = (
+            "registered"
+            if provisioning_operation_id is not None
+            else "accounts_confirmed"
+        )
+        for event in context["events"]:
+            event.status = status
+            event.decision_by = operator
+            event.decision_details = decision_details
+            event.provisioning_operation_id = provisioning_operation_id
+            event.decided_at = now
+            event.updated_at = now
+        self.db.add(
+            AuditLog(
+                actor=operator,
+                action="new_employment_accounts_resolved",
+                target=str(context["worker_key"]),
+                result=status,
+                details=json.dumps(
+                    {
+                        "fio": context["fio"],
+                        "event_ids": context["event_ids"],
+                        "decision": decision_details,
+                        "provisioning_operation_id": (
+                            provisioning_operation_id
+                        ),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+        )
         self.db.commit()

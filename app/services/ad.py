@@ -41,6 +41,7 @@ class ADDirectoryUser:
     distinguished_name: str
     is_enabled: bool
     object_guid: str = ""
+    is_expired: bool = False
 
 
 class ActiveDirectoryService:
@@ -160,6 +161,29 @@ class ActiveDirectoryService:
         display_name = str(cls._entry_value(entry, "displayName", "") or "").strip()
         email = str(cls._entry_value(entry, "mail", "") or "").strip()
         user_account_control = int(cls._entry_value(entry, "userAccountControl", 0) or 0)
+        raw_expires = cls._entry_value(entry, "accountExpires", 0)
+        is_expired = False
+        if isinstance(raw_expires, datetime):
+            expires_at = raw_expires
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            is_expired = expires_at.astimezone(timezone.utc) <= datetime.now(
+                timezone.utc
+            )
+        else:
+            try:
+                filetime = int(raw_expires or 0)
+            except (TypeError, ValueError):
+                filetime = 0
+            if filetime not in {0, 9223372036854775807}:
+                windows_epoch = datetime(1601, 1, 1, tzinfo=timezone.utc)
+                try:
+                    expires_at = windows_epoch + timedelta(
+                        microseconds=filetime // 10
+                    )
+                    is_expired = expires_at <= datetime.now(timezone.utc)
+                except OverflowError:
+                    is_expired = False
 
         raw_guid = cls._entry_value(entry, "objectGUID", "")
         if isinstance(raw_guid, bytes) and len(raw_guid) == 16:
@@ -174,6 +198,7 @@ class ActiveDirectoryService:
             distinguished_name=str(entry.entry_dn),
             is_enabled=(user_account_control & 2) == 0,
             object_guid=object_guid,
+            is_expired=is_expired,
         )
 
     def search_users(self, query: str, limit: int = 20) -> list[ADDirectoryUser]:
@@ -202,6 +227,7 @@ class ActiveDirectoryService:
                     "userAccountControl",
                     "distinguishedName",
                     "objectGUID",
+                    "accountExpires",
                 ],
                 size_limit=max(1, min(limit, 50)),
             )
@@ -237,6 +263,7 @@ class ActiveDirectoryService:
                     "userAccountControl",
                     "distinguishedName",
                     "objectGUID",
+                    "accountExpires",
                 ],
                 size_limit=1,
             )
@@ -270,6 +297,7 @@ class ActiveDirectoryService:
                     "userAccountControl",
                     "distinguishedName",
                     "objectGUID",
+                    "accountExpires",
                 ],
                 size_limit=max(1, min(limit, 50)),
             )
@@ -336,7 +364,7 @@ class ActiveDirectoryService:
             for offset in range(0, len(normalized), 200):
                 chunk = normalized[offset:offset + 200]
                 alternatives = "".join(f"(sAMAccountName={escape_filter_chars(login)})" for login in chunk)
-                conn.search(self.settings.ad_base_dn, f"(&(objectCategory=person)(objectClass=user)(|{alternatives}))", attributes=["sAMAccountName","displayName","mail","userAccountControl","distinguishedName","objectGUID"], size_limit=len(chunk))
+                conn.search(self.settings.ad_base_dn, f"(&(objectCategory=person)(objectClass=user)(|{alternatives}))", attributes=["sAMAccountName","displayName","mail","userAccountControl","distinguishedName","objectGUID","accountExpires"], size_limit=len(chunk))
                 for entry in conn.entries:
                     user = self._entry_to_directory_user(entry)
                     if user is not None:
@@ -388,6 +416,7 @@ class ActiveDirectoryService:
                         "userAccountControl",
                         "distinguishedName",
                         "objectGUID",
+                        "accountExpires",
                     ],
                     size_limit=len(chunk),
                 )
@@ -474,6 +503,7 @@ class ActiveDirectoryService:
                         "userAccountControl",
                         "distinguishedName",
                         "objectGUID",
+                        "accountExpires",
                     ],
                     size_limit=1,
                 )
@@ -734,6 +764,25 @@ class ActiveDirectoryService:
             ):
                 raise RuntimeError(
                     "AD не включил пользователя: "
+                    f"{conn.result.get('message') or conn.result}"
+                )
+
+    def reactivate_existing_user(self, dn: str) -> None:
+        """Включить прежнюю учетку и снять оставшийся срок увольнения."""
+
+        normalized_dn = str(dn or "").strip()
+        if not normalized_dn:
+            raise ValueError("Не передан DN учетной записи AD")
+        self.enable_existing_user(normalized_dn)
+        if self.settings.dry_run:
+            return
+        with self._service_connection() as conn:
+            if not conn.modify(
+                normalized_dn,
+                {"accountExpires": [(MODIFY_REPLACE, [0])]},
+            ):
+                raise RuntimeError(
+                    "AD не снял срок действия учетной записи: "
                     f"{conn.result.get('message') or conn.result}"
                 )
 

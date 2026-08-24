@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Учётные записи приняты{% endblock %}
+{% block content %}
+<h1>{{ 'Учётные записи восстановлены' if result.restored else 'Учётные записи приняты' }}</h1>
+
+{% if error %}
+<div class="alert error">{{ error }}</div>
+{% else %}
+<div class="alert success">
+  Кадровое появление обработано. Новые дубли учётных записей не создавались.
+</div>
+{% endif %}
+
+<section class="card">
+  <h2>{{ result.fio }}</h2>
+  <div class="state-grid">
+    <span>Active Directory</span><strong>{{ result.ad_login }}</strong>
+    <span>Почтовый ящик</span><strong>{{ result.zimbra_email }}</strong>
+    <span>Результат</span>
+    <strong>
+      {{ 'Доступ восстановлен и сопоставление сохранено' if result.restored else 'Сопоставление сохранено' }}
+    </strong>
+  </div>
+</section>
+
+<p class="muted">
+  Пароли не считывались и не изменялись. При необходимости пароль AD следует
+  сбросить отдельным операторским действием.
+</p>
+{% endblock %}

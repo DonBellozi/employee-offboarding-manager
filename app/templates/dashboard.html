@@ -71,8 +71,8 @@
         <a class="button"
            href="{{ item.registration_url }}"
            data-workspace-modal
-           data-workspace-title="Регистрация работника"
-           data-workspace-refresh="true">Зарегистрировать</a>
+           data-workspace-title="Проверка учётных записей"
+           data-workspace-refresh="true">Проверить учётки</a>
         <form method="post" action="/employees/arrivals/not-required" class="inline">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="arrival_event_ids" value="{{ item.event_ids_value }}">

@@ -264,14 +264,18 @@ class ADReactivationAlertService:
 
             ad = ActiveDirectoryService(self.settings)
             resolution = "already_enabled"
-            if not user.is_enabled:
-                ad.enable_existing_user(user.distinguished_name)
+            if not user.is_enabled or user.is_expired:
+                ad.reactivate_existing_user(user.distinguished_name)
                 verified = (
                     ad.get_user_by_object_guid(user.object_guid)
                     if user.object_guid
                     else ad.get_user(user.username)
                 )
-                if verified is None or not verified.is_enabled:
+                if (
+                    verified is None
+                    or not verified.is_enabled
+                    or verified.is_expired
+                ):
                     raise RuntimeError(
                         "AD не подтвердил включение учетной записи"
                     )

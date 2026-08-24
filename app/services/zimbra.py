@@ -892,6 +892,18 @@ class ZimbraService:
             ["ma", normalized, "zimbraAccountStatus", "closed"]
         )
 
+    def open_account(self, email: str) -> None:
+        """Вернуть закрытый ящик Zimbra в штатный статус active."""
+
+        normalized = str(email or "").strip().lower()
+        if not normalized or "@" not in normalized:
+            raise ValueError("Не передан адрес учетной записи Zimbra")
+        if self.settings.dry_run:
+            return
+        self._run_zmprov_direct(
+            ["ma", normalized, "zimbraAccountStatus", "active"]
+        )
+
     def remove_alias(self, primary_email: str, alias: str) -> None:
         """Удалить только организационный alias, не затрагивая сам ящик."""
         primary = str(primary_email or "").strip().lower()

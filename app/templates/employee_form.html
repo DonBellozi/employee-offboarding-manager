@@ -58,7 +58,194 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
   }
 });
 </script>
+{% elif arrival_accounts|default(None) and arrival_accounts.has_candidates and not force_new|default(false) %}
+<section class="card">
+  <h2>Найдены существующие учётные записи</h2>
+  <p>
+    {{ arrival_accounts.fio }} уже работал в компании либо учётные записи были
+    созданы заранее. Выберите существующие AD и почту, чтобы не создавать дубль.
+  </p>
+
+  {% if arrival_accounts.errors %}
+  <div class="alert warning">
+    {% for item in arrival_accounts.errors %}<div>{{ item }}</div>{% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Система</th><th>Учётная запись</th><th>Состояние</th></tr></thead>
+      <tbody>
+      {% for item in arrival_accounts.ad_candidates %}
+      <tr>
+        <td>Active Directory</td>
+        <td>
+          <strong>{{ item.username }}</strong>
+          <div class="muted">{{ item.display_name or 'ФИО не указано' }}</div>
+          {% if item.email %}<div class="muted">{{ item.email }}</div>{% endif %}
+        </td>
+        <td>
+          <span class="status {{ 'success' if item.status == 'active' else 'failed' }}">
+            {% if item.status == 'active' %}Включена{% elif item.status == 'expired' %}Истёк срок действия{% else %}Отключена{% endif %}
+          </span>
+        </td>
+      </tr>
+      {% endfor %}
+      {% for item in arrival_accounts.zimbra_candidates %}
+      <tr>
+        <td>Zimbra</td>
+        <td>
+          <strong>{{ item.primary_email }}</strong>
+          {% if item.addresses|length > 1 %}
+          <div class="muted">Адреса: {{ item.addresses|join(', ') }}</div>
+          {% endif %}
+        </td>
+        <td>
+          <span class="status {{ 'success' if item.status == 'active' else 'failed' }}">
+            {% if item.status == 'active' %}Активна{% elif item.status == 'closed' %}Закрыта{% else %}{{ item.status }}{% endif %}
+          </span>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Выбор оператора</h2>
+  <form method="post"
+        action="/employees/arrivals/accounts/resolve"
+        class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids }}">
+    <div class="grid two">
+      <label>Логин AD
+        <input type="text"
+               name="ad_login"
+               list="arrival-ad-candidates"
+               value="{{ arrival_accounts.suggested_ad_login }}"
+               autocomplete="off"
+               required>
+        <datalist id="arrival-ad-candidates">
+          {% for item in arrival_accounts.ad_candidates %}
+          <option value="{{ item.username }}">{{ item.display_name }}</option>
+          {% endfor %}
+        </datalist>
+      </label>
+      <label>Адрес ящика Zimbra
+        <input type="email"
+               name="zimbra_email"
+               list="arrival-zimbra-candidates"
+               value="{{ arrival_accounts.suggested_zimbra_email }}"
+               autocomplete="off"
+               required>
+        <datalist id="arrival-zimbra-candidates">
+          {% for item in arrival_accounts.zimbra_candidates %}
+          <option value="{{ item.primary_email }}">{{ item.status }}</option>
+          {% endfor %}
+        </datalist>
+      </label>
+    </div>
+    <p class="muted">
+      Можно ввести логин и адрес вручную, если новые реквизиты уже назначены.
+      Пароли для сопоставления не нужны и системой не считываются.
+    </p>
+    <div class="actions">
+      {% if arrival_accounts.pair_restorable %}
+      <button type="submit" name="action" value="restore">
+        Восстановить и принять
+      </button>
+      {% else %}
+      <button type="submit" name="action" value="confirm">
+        {{ 'Принять существующие' if arrival_accounts.pair_active else 'Проверить и сопоставить' }}
+      </button>
+      {% if not arrival_accounts.pair_active %}
+      <button class="button secondary" type="submit" name="action" value="restore">
+        Восстановить выбранные
+      </button>
+      {% endif %}
+      {% endif %}
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Если нужна новая учётная запись</h2>
+  <p class="muted">
+    Система откроет обычный выбор логина. Занятый старый логин использовать
+    нельзя — потребуется выбрать свободный вариант.
+  </p>
+  <div class="actions">
+    <form method="get" action="/employees/new">
+      <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids }}">
+      <input type="hidden" name="force_new" value="true">
+      <button class="button secondary" type="submit">Создать новый логин</button>
+    </form>
+    <form method="get" action="/employees/new">
+      <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids }}">
+      <button class="button secondary" type="submit">Проверить снова</button>
+    </form>
+  </div>
+</section>
 {% else %}
+{% if arrival_accounts|default(None) and arrival_accounts.has_candidates and force_new|default(false) %}
+<div class="alert warning">
+  Для работника найдены существующие учётные записи. Вы выбрали создание
+  нового логина; старый занятый вариант пройти итоговую проверку не сможет.
+</div>
+<form method="get" action="/employees/new" class="actions">
+  <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids }}">
+  <button class="button secondary" type="submit">Вернуться к существующим учёткам</button>
+</form>
+{% elif arrival_accounts|default(None) and arrival_accounts.errors %}
+<div class="alert warning">
+  Проверка существующих учётных записей выполнена не полностью:
+  {% for item in arrival_accounts.errors %}<div>{{ item }}</div>{% endfor %}
+</div>
+{% endif %}
+
+{% if arrival_accounts|default(None) and arrival_event_ids|default('') and not arrival_accounts.has_candidates %}
+<section class="card">
+  <h2>Если учётные записи уже выдали вручную</h2>
+  <p class="muted">
+    Укажите фактический логин AD и адрес почты. Система проверит их напрямую,
+    сопоставит с работником и не станет создавать дубли. Пароль вводить не
+    нужно: он не считывается и не сохраняется.
+  </p>
+  <form method="post"
+        action="/employees/arrivals/accounts/resolve"
+        class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids }}">
+    <div class="grid two">
+      <label>Фактический логин AD
+        <input type="text"
+               name="ad_login"
+               value="{{ arrival_accounts.suggested_ad_login }}"
+               autocomplete="off"
+               required>
+      </label>
+      <label>Фактический адрес ящика Zimbra
+        <input type="email"
+               name="zimbra_email"
+               value="{{ arrival_accounts.suggested_zimbra_email }}"
+               autocomplete="off"
+               required>
+      </label>
+    </div>
+    <div class="actions">
+      <button class="button secondary" type="submit" name="action" value="confirm">
+        Проверить и сопоставить
+      </button>
+      <button class="button secondary" type="submit" name="action" value="restore">
+        Восстановить и сопоставить
+      </button>
+    </div>
+  </form>
+</section>
+{% endif %}
+
 <form method="post" action="/employees/provision" class="stack" id="provision-form">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids|default('') }}">

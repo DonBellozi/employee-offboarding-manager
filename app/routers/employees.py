@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import re
 import time
+from dataclasses import replace
 from datetime import date
+from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -26,6 +28,9 @@ from app.security import get_current_user, get_or_create_csrf, validate_csrf
 from app.services.ad import ActiveDirectoryService
 from app.services.blocking import BlockingService
 from app.services.employee_arrivals import EmployeeArrivalService
+from app.services.employee_arrival_accounts import (
+    EmployeeArrivalAccountService,
+)
 from app.services.hr_registry import HRRegistryService
 from app.services.names import build_login_candidates, parse_two_line_input, validate_person_name
 from app.services.provisioning import ProvisioningInput, ProvisioningService
@@ -583,6 +588,8 @@ def new_employee(
     request: Request,
     fio: str = "",
     arrival_event_ids: str = "",
+    force_new: bool = False,
+    account_error: str = "",
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
@@ -603,6 +610,14 @@ def new_employee(
             )[:MAX_BACKGROUND_CANDIDATES]
             if not candidates:
                 raise RuntimeError("Не удалось сформировать логин из ФИО")
+            hr_login = next(iter(arrival["logins"]), "")
+            if LOGIN_RE.fullmatch(hr_login) and hr_login not in candidates:
+                candidates.insert(0, hr_login)
+                candidates = candidates[:MAX_BACKGROUND_CANDIDATES]
+            account_state = EmployeeArrivalAccountService(
+                settings,
+                db,
+            ).inspect(arrival["event_ids_value"])
             preferred_domain = str(arrival["preferred_domain"])
             return templates.TemplateResponse(
                 request,
@@ -612,15 +627,21 @@ def new_employee(
                     domains=domains,
                     parsed=parsed,
                     candidates=candidates,
-                    selected_login=candidates[0],
+                    selected_login=(
+                        hr_login
+                        if LOGIN_RE.fullmatch(hr_login)
+                        else candidates[0]
+                    ),
                     selected_domain=(
                         preferred_domain if preferred_domain in domains else ""
                     ),
-                    error="",
+                    error=account_error,
                     raw_input=raw_input,
                     domain_mode=settings.zimbra_domain_mode,
                     no_email_confirmed=False,
                     arrival_event_ids=arrival["event_ids_value"],
+                    arrival_accounts=account_state,
+                    force_new=force_new,
                 ),
             )
         except Exception as exc:
@@ -637,6 +658,8 @@ def new_employee(
                     raw_input=fio.strip(),
                     domain_mode=settings.zimbra_domain_mode,
                     arrival_event_ids="",
+                    arrival_accounts=None,
+                    force_new=False,
                 ),
                 status_code=400,
             )
@@ -652,8 +675,52 @@ def new_employee(
             raw_input=fio.strip(),
             domain_mode=settings.zimbra_domain_mode,
             arrival_event_ids="",
+            arrival_accounts=None,
+            force_new=False,
         ),
     )
+
+
+@router.post("/employees/arrivals/accounts/resolve")
+def resolve_employee_arrival_accounts(
+    request: Request,
+    arrival_event_ids: str = Form(...),
+    ad_login: str = Form(...),
+    zimbra_email: str = Form(...),
+    action: str = Form("confirm"),
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    user = get_current_user(request)
+    try:
+        if action not in {"confirm", "restore"}:
+            raise ValueError("Неизвестное действие с учетными записями")
+        result = EmployeeArrivalAccountService(settings, db).resolve(
+            raw_event_ids=arrival_event_ids,
+            ad_login=ad_login,
+            zimbra_email=zimbra_email,
+            actor=user.username,
+            restore_closed=action == "restore",
+        )
+        return templates.TemplateResponse(
+            request,
+            "employee_arrival_accounts_result.html",
+            _context(
+                request,
+                result=result,
+                error="",
+            ),
+        )
+    except Exception as exc:
+        db.rollback()
+        return RedirectResponse(
+            "/employees/new?"
+            f"arrival_event_ids={quote_plus(arrival_event_ids)}&"
+            f"account_error={quote_plus(str(exc))}",
+            status_code=303,
+        )
 
 
 @router.post("/employees/parse")
@@ -928,12 +995,42 @@ def provision_employee(
             mail_domain=mail_domain,
         )
         credentials = ProvisioningService(settings).provision(db, user.username, data)
-        if arrival_event_ids.strip() and credentials.status in {"success", "partial"}:
-            arrival_service.mark_registered(
-                arrival_event_ids,
-                operator=user.username,
-                provisioning_operation_id=credentials.operation_id,
-            )
+        if (
+            arrival_event_ids.strip()
+            and credentials.ad_created
+            and credentials.zimbra_created
+        ):
+            try:
+                EmployeeArrivalAccountService(settings, db).resolve(
+                    raw_event_ids=arrival_event_ids,
+                    ad_login=credentials.ad_login,
+                    zimbra_email=credentials.corporate_email,
+                    actor=user.username,
+                    restore_closed=False,
+                    provisioning_operation_id=credentials.operation_id,
+                )
+            except Exception as mapping_exc:
+                db.rollback()
+                db.add(
+                    AuditLog(
+                        actor=user.username,
+                        action="new_employment_created_mapping_failed",
+                        target=arrival_event_ids,
+                        result="error",
+                        details=str(mapping_exc)[:4000],
+                    )
+                )
+                db.commit()
+                credentials = replace(
+                    credentials,
+                    status="partial",
+                    warnings=(
+                        *credentials.warnings,
+                        "Учетные записи созданы, но кадровое событие осталось "
+                        "открытым: не удалось сохранить сопоставление — "
+                        f"{mapping_exc}",
+                    ),
+                )
         response = templates.TemplateResponse(
             request,
             "result.html",
