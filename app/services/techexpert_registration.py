@@ -135,7 +135,7 @@ def append_operator_signature(
 
 
 class TechExpertRegistrationService:
-    """Ручной запрос регистрации с предпросмотром и подтвержденным действием."""
+    """Ручной запрос регистрации/восстановления с предпросмотром."""
 
     def __init__(
         self,
@@ -162,6 +162,10 @@ class TechExpertRegistrationService:
             raise ValueError("Не настроена тема письма о регистрации")
         if not str(self.config.registration_body_html or "").strip():
             raise ValueError("Не настроен шаблон письма о регистрации")
+        if not str(self.config.recovery_subject or "").strip():
+            raise ValueError("Не настроена тема письма о восстановлении доступа")
+        if not str(self.config.recovery_body_html or "").strip():
+            raise ValueError("Не настроен шаблон письма о восстановлении доступа")
 
     def _active_states(self) -> dict[str, HREmploymentState]:
         if not self.source_id:
@@ -401,11 +405,17 @@ class TechExpertRegistrationService:
         ad_user = self._resolve_ad(record)
         is_member = self._is_group_member(ad_user)
         self._sync_access_marker(record, is_member)
-        if is_member:
-            raise ValueError(
-                "Работник уже состоит в группе Техэксперта. "
-                "Повторная регистрация не требуется."
-            )
+        request_kind = "recovery" if is_member else "registration"
+        subject_template = (
+            self.config.recovery_subject
+            if request_kind == "recovery"
+            else self.config.registration_subject
+        )
+        body_template = (
+            self.config.recovery_body_html
+            if request_kind == "recovery"
+            else self.config.registration_body_html
+        )
         profile = get_domain_mail_profile(
             self.db,
             self.settings,
@@ -427,11 +437,12 @@ class TechExpertRegistrationService:
             actor_source=actor_source,
         )
         rendered_body = render_mail_template(
-            self.config.registration_body_html,
+            body_template,
             context,
             autoescape=True,
         )
         request = TechExpertRegistrationRequest(
+            request_kind=request_kind,
             worker_key=record.worker_key,
             source_id=self.source_id,
             source_name=record.source_name or self.source_id,
@@ -451,13 +462,18 @@ class TechExpertRegistrationService:
             sender_email=profile.sender_email,
             sender_name=profile.sender_name,
             subject=render_mail_template(
-                self.config.registration_subject,
+                subject_template,
                 context,
                 autoescape=False,
             ),
             body_html=append_operator_signature(
                 rendered_body,
                 operator_identity,
+            ),
+            group_status=(
+                "already_member"
+                if request_kind == "recovery"
+                else "not_started"
             ),
             created_by=str(actor or "").strip(),
         )
@@ -472,6 +488,7 @@ class TechExpertRegistrationService:
                 details=json.dumps(
                     {
                         "worker_key": record.worker_key,
+                        "request_kind": request.request_kind,
                         "source_id": self.source_id,
                         "fio": record.fio,
                         "department": request.department,
@@ -494,7 +511,7 @@ class TechExpertRegistrationService:
     def get_request(self, request_id: int) -> TechExpertRegistrationRequest:
         request = self.db.get(TechExpertRegistrationRequest, int(request_id))
         if request is None or normalize_email(request.source_id) != self.source_id:
-            raise LookupError("Запрос регистрации не найден")
+            raise LookupError("Запрос Техэксперта не найден")
         return request
 
     def _snapshot_matches(
@@ -531,6 +548,7 @@ class TechExpertRegistrationService:
                 details=json.dumps(
                     {
                         "worker_key": request.worker_key,
+                        "request_kind": request.request_kind,
                         "group_status": request.group_status,
                         "email_status": request.email_status,
                         "recipient": request.recipient_email,
@@ -598,27 +616,73 @@ class TechExpertRegistrationService:
 
         ad = ActiveDirectoryService(self.settings)
         try:
-            group_status = ad.ensure_user_in_group(
-                request.ad_login,
-                self.config.ad_group_dn,
-                object_guid=request.ad_object_guid,
+            request_kind = (
+                "recovery"
+                if request.request_kind == "recovery"
+                else "registration"
             )
-            request.group_status = group_status
-            request.group_error = ""
-            if group_status == "dry_run":
-                request.status = "dry_run"
-                request.email_status = "dry_run"
-                self._audit_result(request, actor)
-                self.db.commit()
-                return request
-            if not ad.is_user_member_of_group(
-                request.ad_login,
-                self.config.ad_group_dn,
-                object_guid=request.ad_object_guid,
-            ):
-                raise RuntimeError(
-                    "AD не подтвердил членство работника в группе Техэксперта"
+            if request_kind == "recovery":
+                if not ad.is_user_member_of_group(
+                    request.ad_login,
+                    self.config.ad_group_dn,
+                    object_guid=request.ad_object_guid,
+                ):
+                    record.techexpert_access = False
+                    request.status = "stale"
+                    request.group_status = "not_member"
+                    request.group_error = ""
+                    request.last_error = (
+                        "Работник больше не состоит в группе Техэксперта. "
+                        "Подготовьте запрос заново."
+                    )
+                    self._audit_result(request, actor)
+                    self.db.commit()
+                    return request
+                request.group_status = "already_member"
+                request.group_error = ""
+            elif request.group_status in {"added", "already_member"}:
+                if not ad.is_user_member_of_group(
+                    request.ad_login,
+                    self.config.ad_group_dn,
+                    object_guid=request.ad_object_guid,
+                ):
+                    raise RuntimeError(
+                        "AD не подтвердил членство работника в группе "
+                        "Техэксперта"
+                    )
+            else:
+                group_status = ad.ensure_user_in_group(
+                    request.ad_login,
+                    self.config.ad_group_dn,
+                    object_guid=request.ad_object_guid,
                 )
+                request.group_status = group_status
+                request.group_error = ""
+                if group_status == "dry_run":
+                    request.status = "dry_run"
+                    request.email_status = "dry_run"
+                    self._audit_result(request, actor)
+                    self.db.commit()
+                    return request
+                if group_status == "already_member":
+                    record.techexpert_access = True
+                    request.status = "stale"
+                    request.last_error = (
+                        "Работник уже состоит в группе Техэксперта. "
+                        "Подготовьте запрос на восстановление доступа."
+                    )
+                    self._audit_result(request, actor)
+                    self.db.commit()
+                    return request
+                if not ad.is_user_member_of_group(
+                    request.ad_login,
+                    self.config.ad_group_dn,
+                    object_guid=request.ad_object_guid,
+                ):
+                    raise RuntimeError(
+                        "AD не подтвердил членство работника в группе "
+                        "Техэксперта"
+                    )
             record.techexpert_access = True
             self.db.commit()
         except Exception as exc:

@@ -247,6 +247,8 @@ def techexpert_save(
     body_html: str = Form(...),
     registration_subject: str = Form(...),
     registration_body_html: str = Form(...),
+    recovery_subject: str = Form(...),
+    recovery_body_html: str = Form(...),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
@@ -263,6 +265,8 @@ def techexpert_save(
             body_html=body_html,
             registration_subject=registration_subject,
             registration_body_html=registration_body_html,
+            recovery_subject=recovery_subject,
+            recovery_body_html=recovery_body_html,
             actor=current.username,
         )
         return _redirect(message="Настройки Техэксперта сохранены")
@@ -367,6 +371,7 @@ def techexpert_test_registration_email(
     request: Request,
     csrf: str = Form(...),
     test_recipient: str = Form(...),
+    request_kind: str = Form("registration"),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
@@ -392,15 +397,26 @@ def techexpert_test_registration_email(
             "department": "Центральный аппарат",
             "organization": "Тестовая организация",
         }
+        is_recovery = request_kind == "recovery"
+        subject_template = (
+            config.recovery_subject
+            if is_recovery
+            else config.registration_subject
+        )
+        body_template = (
+            config.recovery_body_html
+            if is_recovery
+            else config.registration_body_html
+        )
         rendered_body = render_mail_template(
-            config.registration_body_html,
+            body_template,
             context,
             autoescape=True,
         )
         CredentialMailer(settings).send_html(
             recipient=recipient,
             subject=render_mail_template(
-                config.registration_subject,
+                subject_template,
                 context,
                 autoescape=False,
             ),
@@ -416,12 +432,18 @@ def techexpert_test_registration_email(
             sender_email=profile.sender_email,
             sender_name=profile.sender_name,
         )
+        letter_name = "о восстановлении доступа" if is_recovery else "о регистрации"
         return _redirect(
-            message=f"Тестовое письмо о регистрации отправлено на {recipient}"
+            message=f"Тестовое письмо {letter_name} отправлено на {recipient}"
         )
     except Exception as exc:
+        letter_name = (
+            "о восстановлении доступа"
+            if request_kind == "recovery"
+            else "о регистрации"
+        )
         return _redirect(
-            error=f"Тестовое письмо о регистрации не отправлено: {exc}"
+            error=f"Тестовое письмо {letter_name} не отправлено: {exc}"
         )
 
 
@@ -493,9 +515,14 @@ def techexpert_registration_prepare(
             actor=current.username,
             actor_source=current.source,
         )
+        letter_name = (
+            "Запрос на восстановление доступа"
+            if registration.request_kind == "recovery"
+            else "Письмо о регистрации"
+        )
         return _registration_redirect(
             registration_id=registration.id,
-            message="Письмо подготовлено. Проверьте его перед отправкой.",
+            message=f"{letter_name} подготовлен. Проверьте его перед отправкой.",
         )
     except Exception as exc:
         db.rollback()
@@ -522,14 +549,24 @@ def techexpert_registration_execute(
             db,
             config,
         ).execute(request_id=registration_id, actor=current.username)
+        is_recovery = registration.request_kind == "recovery"
         if registration.status == "sent":
-            message = "Работник добавлен в группу, письмо отправлено."
+            message = (
+                "Запрос на восстановление доступа отправлен."
+                if is_recovery
+                else "Работник добавлен в группу, письмо отправлено."
+            )
             error = ""
         elif registration.status == "partial":
             message = ""
             error = (
-                "Работник добавлен в группу, но письмо не отправлено. "
+                "Письмо о восстановлении доступа не отправлено. "
                 "Исправьте SMTP и повторите отправку."
+                if is_recovery
+                else (
+                    "Работник добавлен в группу, но письмо не отправлено. "
+                    "Исправьте SMTP и повторите отправку."
+                )
             )
         elif registration.status == "dry_run":
             message = "DRY_RUN: группа и почта не изменены."

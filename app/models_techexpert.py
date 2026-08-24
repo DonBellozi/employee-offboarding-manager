@@ -27,6 +27,8 @@ class TechExpertSettings(Base):
     body_html: Mapped[str] = mapped_column(Text)
     registration_subject: Mapped[str] = mapped_column(String(512), default="")
     registration_body_html: Mapped[str] = mapped_column(Text, default="")
+    recovery_subject: Mapped[str] = mapped_column(String(512), default="")
+    recovery_body_html: Mapped[str] = mapped_column(Text, default="")
     updated_by: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -300,11 +302,14 @@ class TechExpertActualizationItem(Base):
 
 
 class TechExpertRegistrationRequest(Base):
-    """Подготовленный и исполненный запрос на регистрацию пользователя."""
+    """Подготовленный запрос на регистрацию или восстановление доступа."""
 
     __tablename__ = "techexpert_registration_requests"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    request_kind: Mapped[str] = mapped_column(
+        String(32), default="registration", index=True
+    )
     worker_key: Mapped[str] = mapped_column(String(64), index=True)
     source_id: Mapped[str] = mapped_column(String(128), index=True)
     source_name: Mapped[str] = mapped_column(String(256), default="")

@@ -186,6 +186,35 @@
       </p>
     </section>
 
+    <section class="mail-template-section">
+      <h3>Восстановление доступа</h3>
+      <label>
+        <span>Тема письма</span>
+        <input type="text"
+               name="recovery_subject"
+               value="{{ techexpert.recovery_subject }}"
+               maxlength="512"
+               required>
+      </label>
+      <label>
+        <span>HTML-шаблон письма</span>
+        <textarea name="recovery_body_html"
+                  rows="16"
+                  required
+                  spellcheck="false">{{ techexpert.recovery_body_html }}</textarea>
+      </label>
+      <div class="template-variables">
+        <span>Доступные переменные:</span>
+        {% for variable in registration_template_variables|sort %}
+        <code>{{ "{{ " }}{{ variable }}{{ " }}" }}</code>
+        {% endfor %}
+      </div>
+      <p class="muted mail-template-hint">
+        Этот шаблон используется вместо регистрации, когда работник уже
+        состоит в группе AD «Техэксперт».
+      </p>
+    </section>
+
     <div class="alert warning">
       Все готовые события одного цикла объединяются в одно письмо. Отсрочка на
       7 дней исключает работника из текущего списка; перед SMTP кадровые данные
@@ -224,12 +253,25 @@
   <h3>Регистрация пользователя</h3>
   <form method="post" action="/settings/techexpert/test-registration-email">
     <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="request_kind" value="registration">
     <div class="mail-template-test-row">
       <label>
         <span>Тестовый адрес</span>
         <input type="email" name="test_recipient" placeholder="user@example.ru" required>
       </label>
       <button class="button secondary" type="submit">Отправить тест регистрации</button>
+    </div>
+  </form>
+  <h3>Восстановление доступа</h3>
+  <form method="post" action="/settings/techexpert/test-registration-email">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="request_kind" value="recovery">
+    <div class="mail-template-test-row">
+      <label>
+        <span>Тестовый адрес</span>
+        <input type="email" name="test_recipient" placeholder="user@example.ru" required>
+      </label>
+      <button class="button secondary" type="submit">Отправить тест восстановления</button>
     </div>
   </form>
 </section>

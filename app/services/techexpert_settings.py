@@ -33,6 +33,10 @@ TECHEXPERT_REGISTRATION_TEMPLATE_VARIABLES = {
     "organization",
 }
 
+TECHEXPERT_RECOVERY_TEMPLATE_VARIABLES = (
+    TECHEXPERT_REGISTRATION_TEMPLATE_VARIABLES
+)
+
 LEGACY_TECHEXPERT_SUBJECT = (
     "Прекращение доступа к системе «Техэксперт»: {{ full_name }}"
 )
@@ -158,6 +162,40 @@ DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML = """\
 </table>
 """
 
+DEFAULT_TECHEXPERT_RECOVERY_SUBJECT = (
+    "Восстановление доступа к системе «Техэксперт» — {{ full_name }}"
+)
+
+DEFAULT_TECHEXPERT_RECOVERY_BODY_HTML = """\
+<p><strong>{{ department }}</strong></p>
+<p>
+  Пользователь уже состоит в группе доступа AD «Техэксперт».
+  Просим восстановить его существующую учетную запись в системе
+  «Техэксперт» и повторно направить пользователю логин и пароль на
+  корпоративный e-mail.
+</p>
+<table border="1" cellpadding="6" cellspacing="0">
+  <thead>
+    <tr>
+      <th>ФИО</th>
+      <th>Должность</th>
+      <th>E-mail</th>
+      <th>Телефон</th>
+      <th>Логин AD</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>{{ full_name }}</td>
+      <td>{{ position }}</td>
+      <td>{{ corporate_email }}</td>
+      <td>{{ mobile_phone }}</td>
+      <td>{{ login }}</td>
+    </tr>
+  </tbody>
+</table>
+"""
+
 
 def build_techexpert_template_context(
     employees: list[dict[str, str]],
@@ -242,6 +280,12 @@ def ensure_techexpert_settings(db: Session) -> TechExpertSettings:
                 DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML
             )
             changed = True
+        if not row.recovery_subject.strip():
+            row.recovery_subject = DEFAULT_TECHEXPERT_RECOVERY_SUBJECT
+            changed = True
+        if not row.recovery_body_html.strip():
+            row.recovery_body_html = DEFAULT_TECHEXPERT_RECOVERY_BODY_HTML
+            changed = True
         if changed:
             db.commit()
             db.refresh(row)
@@ -254,6 +298,8 @@ def ensure_techexpert_settings(db: Session) -> TechExpertSettings:
         body_html=DEFAULT_TECHEXPERT_BODY_HTML,
         registration_subject=DEFAULT_TECHEXPERT_REGISTRATION_SUBJECT,
         registration_body_html=DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML,
+        recovery_subject=DEFAULT_TECHEXPERT_RECOVERY_SUBJECT,
+        recovery_body_html=DEFAULT_TECHEXPERT_RECOVERY_BODY_HTML,
     )
     db.add(row)
     db.commit()
@@ -299,6 +345,8 @@ class TechExpertSettingsService:
         body_html: str,
         registration_subject: str | None = None,
         registration_body_html: str | None = None,
+        recovery_subject: str | None = None,
+        recovery_body_html: str | None = None,
     ) -> dict[str, str]:
         domain = normalize(source_domain)
         if not domain:
@@ -349,6 +397,26 @@ class TechExpertSettingsService:
             field_name="HTML-шаблон письма о регистрации",
             autoescape=True,
         )
+        recovery_subject = (
+            str(recovery_subject or "").strip()
+            or DEFAULT_TECHEXPERT_RECOVERY_SUBJECT
+        )
+        recovery_body_html = (
+            str(recovery_body_html or "").strip()
+            or DEFAULT_TECHEXPERT_RECOVERY_BODY_HTML
+        )
+        validate_mail_template(
+            recovery_subject,
+            allowed_variables=TECHEXPERT_RECOVERY_TEMPLATE_VARIABLES,
+            field_name="Тема письма о восстановлении доступа",
+            autoescape=False,
+        )
+        validate_mail_template(
+            recovery_body_html,
+            allowed_variables=TECHEXPERT_RECOVERY_TEMPLATE_VARIABLES,
+            field_name="HTML-шаблон письма о восстановлении доступа",
+            autoescape=True,
+        )
         return {
             "source_domain": domain,
             "ad_group_dn": group_dn,
@@ -358,6 +426,8 @@ class TechExpertSettingsService:
             "body_html": body_html.strip(),
             "registration_subject": registration_subject,
             "registration_body_html": registration_body_html,
+            "recovery_subject": recovery_subject,
+            "recovery_body_html": recovery_body_html,
         }
 
     def save(
@@ -373,6 +443,8 @@ class TechExpertSettingsService:
         actor: str,
         registration_subject: str | None = None,
         registration_body_html: str | None = None,
+        recovery_subject: str | None = None,
+        recovery_body_html: str | None = None,
     ) -> TechExpertSettings:
         row = self.get()
         values = self.validate(
@@ -392,6 +464,16 @@ class TechExpertSettingsService:
                 if registration_body_html is None
                 else registration_body_html
             ),
+            recovery_subject=(
+                row.recovery_subject
+                if recovery_subject is None
+                else recovery_subject
+            ),
+            recovery_body_html=(
+                row.recovery_body_html
+                if recovery_body_html is None
+                else recovery_body_html
+            ),
         )
         row.enabled = bool(enabled)
         row.source_domain = values["source_domain"]
@@ -402,6 +484,8 @@ class TechExpertSettingsService:
         row.body_html = values["body_html"]
         row.registration_subject = values["registration_subject"]
         row.registration_body_html = values["registration_body_html"]
+        row.recovery_subject = values["recovery_subject"]
+        row.recovery_body_html = values["recovery_body_html"]
         row.updated_by = str(actor or "").strip()
         self.db.commit()
         self.db.refresh(row)

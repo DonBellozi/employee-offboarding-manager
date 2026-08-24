@@ -148,6 +148,19 @@ def ensure_compatibility_schema() -> None:
                     "VARCHAR(512) NOT NULL DEFAULT ''"
                 ),
                 "registration_body_html": "TEXT NOT NULL DEFAULT ''",
+                "recovery_subject": (
+                    "VARCHAR(512) NOT NULL DEFAULT ''"
+                ),
+                "recovery_body_html": "TEXT NOT NULL DEFAULT ''",
+            },
+        )
+        add_missing_columns(
+            connection,
+            "techexpert_registration_requests",
+            {
+                "request_kind": (
+                    "VARCHAR(32) NOT NULL DEFAULT 'registration'"
+                ),
             },
         )
         add_missing_columns(
