@@ -28,6 +28,7 @@ TECHEXPERT_REGISTRATION_TEMPLATE_VARIABLES = {
     "position",
     "corporate_email",
     "mobile_phone",
+    "login",
     "department",
     "organization",
 }
@@ -110,7 +111,7 @@ DEFAULT_TECHEXPERT_REGISTRATION_SUBJECT = (
     "Регистрация пользователя в системе «Техэксперт» — {{ full_name }}"
 )
 
-DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML = """\
+PREVIOUS_DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML = """\
 <p><strong>{{ department }}</strong></p>
 <table border="1" cellpadding="6" cellspacing="0">
   <thead>
@@ -127,6 +128,31 @@ DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML = """\
       <td>{{ position }}</td>
       <td>{{ corporate_email }}</td>
       <td>{{ mobile_phone }}</td>
+    </tr>
+  </tbody>
+</table>
+"""
+
+DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML = """\
+<p><strong>{{ department }}</strong></p>
+<p>Просим использовать указанный логин при регистрации пользователя.</p>
+<table border="1" cellpadding="6" cellspacing="0">
+  <thead>
+    <tr>
+      <th>ФИО</th>
+      <th>Должность</th>
+      <th>E-mail</th>
+      <th>Телефон</th>
+      <th>Логин</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>{{ full_name }}</td>
+      <td>{{ position }}</td>
+      <td>{{ corporate_email }}</td>
+      <td>{{ mobile_phone }}</td>
+      <td>{{ login }}</td>
     </tr>
   </tbody>
 </table>
@@ -204,6 +230,14 @@ def ensure_techexpert_settings(db: Session) -> TechExpertSettings:
             row.registration_subject = DEFAULT_TECHEXPERT_REGISTRATION_SUBJECT
             changed = True
         if not row.registration_body_html.strip():
+            row.registration_body_html = (
+                DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML
+            )
+            changed = True
+        elif (
+            row.registration_body_html.strip()
+            == PREVIOUS_DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML.strip()
+        ):
             row.registration_body_html = (
                 DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML
             )

@@ -388,6 +388,7 @@ def techexpert_test_registration_email(
             "position": "Ведущий инженер",
             "corporate_email": f"ivanov@{config.source_domain}",
             "mobile_phone": "+7 900 000-00-00",
+            "login": "ivanov.ii",
             "department": "Центральный аппарат",
             "organization": "Тестовая организация",
         }

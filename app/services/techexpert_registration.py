@@ -416,6 +416,7 @@ class TechExpertRegistrationService:
             "position": str(placement["position"] or "Не указана"),
             "corporate_email": corporate_email,
             "mobile_phone": normalize_text(record.mobile_phone) or "Не указан",
+            "login": ad_user.username,
             "department": str(placement["top_department"]),
             "organization": record.source_name or self.source_id,
         }
@@ -573,6 +574,17 @@ class TechExpertRegistrationService:
                 self.db.commit()
                 return request
             ad_user = self._resolve_ad(record)
+            if normalize_email(request.ad_login) != normalize_email(
+                ad_user.username
+            ):
+                request.status = "stale"
+                request.last_error = (
+                    "Логин AD изменился после предпросмотра. "
+                    "Подготовьте письмо заново."
+                )
+                self._audit_result(request, actor)
+                self.db.commit()
+                return request
             request.ad_login = ad_user.username
             request.ad_object_guid = ad_user.object_guid
         except Exception as exc:
