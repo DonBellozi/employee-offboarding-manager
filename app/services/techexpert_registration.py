@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from html import escape
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import AuditLog, EmailLoginMapping, HRSourceRecord
+from app.models import (
+    AuditLog,
+    DomainAccessUser,
+    EmailLoginMapping,
+    HRSourceRecord,
+)
 from app.models_onec_sources import HREmploymentState
 from app.models_techexpert import (
     TechExpertRegistrationRequest,
@@ -47,6 +53,85 @@ def preview_document(body_html: str) -> str:
         'font-family:Arial,sans-serif;line-height:1.5">'
         f"{body}</body></html>"
     )
+
+
+def operator_mail_identity(
+    db: Session,
+    settings: Settings,
+    *,
+    actor: str,
+    actor_source: str,
+) -> dict[str, str]:
+    """Получить безопасную подпись оператора из назначенного AD-доступа."""
+
+    login = normalize_email(actor)
+    display_name = ""
+    email = ""
+    if actor_source == "ad" and login:
+        access = db.scalar(
+            select(DomainAccessUser).where(
+                DomainAccessUser.username == login,
+                DomainAccessUser.is_active.is_(True),
+            )
+        )
+        if access is not None:
+            display_name = normalize_text(access.display_name)
+            email = normalize_email(access.email)
+
+        # Данные сохраняются при назначении доступа. Если старое назначение
+        # не содержит ФИО или почту, аккуратно дополняем подпись живым чтением
+        # AD, но не блокируем письмо из-за этой вспомогательной проверки.
+        if not display_name or not email:
+            try:
+                directory_user = ActiveDirectoryService(settings).get_user(
+                    login
+                )
+                if directory_user is not None:
+                    display_name = (
+                        normalize_text(directory_user.display_name)
+                        or display_name
+                    )
+                    email = normalize_email(directory_user.email) or email
+            except Exception:
+                pass
+
+    return {
+        "login": login,
+        "display_name": display_name or login or "Оператор системы",
+        "email": email,
+    }
+
+
+def append_operator_signature(
+    body_html: str,
+    identity: dict[str, str],
+) -> str:
+    """Добавить подпись оператора в HTML-письмо и его предпросмотр."""
+
+    display_name = escape(
+        normalize_text(identity.get("display_name")) or "Оператор системы"
+    )
+    email = escape(normalize_email(identity.get("email")))
+    login = escape(normalize_email(identity.get("login")))
+    contact = email or login
+    contact_line = (
+        f'<br><span style="color:#64748b">{contact}</span>'
+        if contact and contact.casefold() != display_name.casefold()
+        else ""
+    )
+    signature = (
+        '<div style="margin-top:24px;padding-top:16px;'
+        'border-top:1px solid #e2e8f0">'
+        "С уважением,<br>"
+        f"<strong>{display_name}</strong>"
+        f"{contact_line}"
+        "</div>"
+    )
+    body = str(body_html or "").rstrip()
+    closing_body = body.casefold().rfind("</body>")
+    if closing_body >= 0:
+        return f"{body[:closing_body]}{signature}{body[closing_body:]}"
+    return f"{body}\n{signature}"
 
 
 class TechExpertRegistrationService:
@@ -302,6 +387,7 @@ class TechExpertRegistrationService:
         record_id: int,
         placement_index: int,
         actor: str,
+        actor_source: str = "",
     ) -> TechExpertRegistrationRequest:
         record, _state = self.active_record(record_id)
         corporate_email = validate_email(
@@ -333,6 +419,17 @@ class TechExpertRegistrationService:
             "department": str(placement["top_department"]),
             "organization": record.source_name or self.source_id,
         }
+        operator_identity = operator_mail_identity(
+            self.db,
+            self.settings,
+            actor=actor,
+            actor_source=actor_source,
+        )
+        rendered_body = render_mail_template(
+            self.config.registration_body_html,
+            context,
+            autoescape=True,
+        )
         request = TechExpertRegistrationRequest(
             worker_key=record.worker_key,
             source_id=self.source_id,
@@ -357,10 +454,9 @@ class TechExpertRegistrationService:
                 context,
                 autoescape=False,
             ),
-            body_html=render_mail_template(
-                self.config.registration_body_html,
-                context,
-                autoescape=True,
+            body_html=append_operator_signature(
+                rendered_body,
+                operator_identity,
             ),
             created_by=str(actor or "").strip(),
         )
@@ -380,6 +476,10 @@ class TechExpertRegistrationService:
                         "department": request.department,
                         "position": request.position,
                         "recipient": request.recipient_email,
+                        "operator_display_name": operator_identity[
+                            "display_name"
+                        ],
+                        "operator_email": operator_identity["email"],
                     },
                     ensure_ascii=False,
                     sort_keys=True,

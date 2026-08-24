@@ -35,6 +35,8 @@ from app.services.techexpert_settings import (
 )
 from app.services.techexpert_registration import (
     TechExpertRegistrationService,
+    append_operator_signature,
+    operator_mail_identity,
     preview_document,
 )
 from app.services.techexpert_access import TechExpertGroupAccessService
@@ -369,7 +371,7 @@ def techexpert_test_registration_email(
     settings: Settings = Depends(get_settings),
 ):
     validate_csrf(request, csrf)
-    require_admin(request)
+    current = require_admin(request)
     try:
         config = TechExpertSettingsService(settings, db).get()
         recipient = normalize_email(
@@ -389,6 +391,11 @@ def techexpert_test_registration_email(
             "department": "Центральный аппарат",
             "organization": "Тестовая организация",
         }
+        rendered_body = render_mail_template(
+            config.registration_body_html,
+            context,
+            autoescape=True,
+        )
         CredentialMailer(settings).send_html(
             recipient=recipient,
             subject=render_mail_template(
@@ -396,10 +403,14 @@ def techexpert_test_registration_email(
                 context,
                 autoescape=False,
             ),
-            body_html=render_mail_template(
-                config.registration_body_html,
-                context,
-                autoescape=True,
+            body_html=append_operator_signature(
+                rendered_body,
+                operator_mail_identity(
+                    db,
+                    settings,
+                    actor=current.username,
+                    actor_source=current.source,
+                ),
             ),
             sender_email=profile.sender_email,
             sender_name=profile.sender_name,
@@ -479,6 +490,7 @@ def techexpert_registration_prepare(
             record_id=record_id,
             placement_index=placement_index,
             actor=current.username,
+            actor_source=current.source,
         )
         return _registration_redirect(
             registration_id=registration.id,
