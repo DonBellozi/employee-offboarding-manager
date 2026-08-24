@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import AuditLog, EmailLoginMapping, HRSourceRecord
 from app.models_dismissal_lifecycle import ADReactivationAlert
-from app.services.ad import ADDirectoryUser, ActiveDirectoryService
+from app.services.ad import (
+    ADDirectoryUser,
+    ActiveDirectoryService,
+    wait_for_reactivated_user,
+)
 from app.services.personnel_structure import PersonnelStructureService
 from app.services.techexpert_access import normalize_email, normalize_fio
 
@@ -266,10 +270,10 @@ class ADReactivationAlertService:
             resolution = "already_enabled"
             if not user.is_enabled or user.is_expired:
                 ad.reactivate_existing_user(user.distinguished_name)
-                verified = (
-                    ad.get_user_by_object_guid(user.object_guid)
-                    if user.object_guid
-                    else ad.get_user(user.username)
+                verified = wait_for_reactivated_user(
+                    ad,
+                    object_guid=user.object_guid,
+                    username=user.username,
                 )
                 if (
                     verified is None

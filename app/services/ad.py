@@ -4,6 +4,7 @@ import ssl
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
+from time import sleep
 from zoneinfo import ZoneInfo
 
 from ldap3 import (
@@ -42,6 +43,36 @@ class ADDirectoryUser:
     is_enabled: bool
     object_guid: str = ""
     is_expired: bool = False
+
+
+def wait_for_reactivated_user(
+    service: "ActiveDirectoryService",
+    *,
+    object_guid: str = "",
+    username: str = "",
+    attempts: int = 4,
+    poll_interval_seconds: float = 0.25,
+) -> ADDirectoryUser | None:
+    """Дождаться, пока AD вернет включенную учетку без срока увольнения."""
+
+    last_user: ADDirectoryUser | None = None
+    total_attempts = max(1, attempts)
+    for attempt in range(total_attempts):
+        current_user: ADDirectoryUser | None = None
+        if str(object_guid or "").strip():
+            current_user = service.get_user_by_object_guid(object_guid)
+        if current_user is None and str(username or "").strip():
+            current_user = service.get_user(username)
+        last_user = current_user
+        if (
+            last_user is not None
+            and last_user.is_enabled
+            and not last_user.is_expired
+        ):
+            return last_user
+        if attempt + 1 < total_attempts:
+            sleep(max(0.0, poll_interval_seconds))
+    return last_user
 
 
 class ActiveDirectoryService:
@@ -163,12 +194,17 @@ class ActiveDirectoryService:
         user_account_control = int(cls._entry_value(entry, "userAccountControl", 0) or 0)
         raw_expires = cls._entry_value(entry, "accountExpires", 0)
         is_expired = False
+        windows_epoch = datetime(1601, 1, 1, tzinfo=timezone.utc)
         if isinstance(raw_expires, datetime):
             expires_at = raw_expires
             if expires_at.tzinfo is None:
                 expires_at = expires_at.replace(tzinfo=timezone.utc)
-            is_expired = expires_at.astimezone(timezone.utc) <= datetime.now(
-                timezone.utc
+            expires_at = expires_at.astimezone(timezone.utc)
+            # ldap3 может представить accountExpires=0 служебной датой
+            # 1601-01-01. В AD это означает «срок действия не ограничен».
+            is_expired = (
+                expires_at > windows_epoch
+                and expires_at <= datetime.now(timezone.utc)
             )
         else:
             try:
@@ -176,7 +212,6 @@ class ActiveDirectoryService:
             except (TypeError, ValueError):
                 filetime = 0
             if filetime not in {0, 9223372036854775807}:
-                windows_epoch = datetime(1601, 1, 1, tzinfo=timezone.utc)
                 try:
                     expires_at = windows_epoch + timedelta(
                         microseconds=filetime // 10

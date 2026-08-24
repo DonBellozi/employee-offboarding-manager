@@ -9,7 +9,11 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import AuditLog, EmailLoginMapping, HRSourceRecord
-from app.services.ad import ADDirectoryUser, ActiveDirectoryService
+from app.services.ad import (
+    ADDirectoryUser,
+    ActiveDirectoryService,
+    wait_for_reactivated_user,
+)
 from app.services.employee_arrivals import EmployeeArrivalService
 from app.services.zimbra import ZimbraAccountIdentity, ZimbraService
 
@@ -385,7 +389,11 @@ class EmployeeArrivalAccountService:
                 )
             if not ad_user.is_enabled or ad_user.is_expired:
                 ad.reactivate_existing_user(ad_user.distinguished_name)
-                ad_user = ad.get_user_by_object_guid(ad_user.object_guid)
+                ad_user = wait_for_reactivated_user(
+                    ad,
+                    object_guid=ad_user.object_guid,
+                    username=ad_user.username,
+                )
                 if (
                     ad_user is None
                     or not ad_user.is_enabled
