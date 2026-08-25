@@ -48,6 +48,7 @@ POLL_SECONDS = 60
 # блокировок общее для AD, Zimbra и Synology DSM. Имена сохранены здесь ради
 # уже существующих ссылок в коде и тестах.
 SUCCESS_TARGET_STATUSES = {"completed", "already_completed"}
+LEGACY_NO_AD_ACCOUNT_ERROR = "Не найдена связанная учетная запись AD"
 # На текущем этапе кадровое решение управляет только общей учеткой AD.
 SYSTEM_LABELS = {
     "ad": "AD",
@@ -251,6 +252,49 @@ class FinalDismissalLifecycleService:
             ).all()
         )
         return records, mappings
+
+    def _repair_legacy_no_account_runs(self) -> int:
+        """Завершить старые пустые run, не ожидая вечерней выгрузки.
+
+        Исправляются только записи с точным старым текстом ошибки, без targets,
+        без определяемой AD-учетки и без активной занятости. Реальные ошибки
+        существующих целей AD этот ремонт не затрагивает.
+        """
+
+        rows = list(
+            self.db.scalars(
+                select(FinalDismissalBlockRun).where(
+                    FinalDismissalBlockRun.status == "intervention",
+                    FinalDismissalBlockRun.last_error
+                    == LEGACY_NO_AD_ACCOUNT_ERROR,
+                )
+            ).all()
+        )
+        repaired = 0
+        for run in rows:
+            if self._targets(run.id):
+                continue
+            states = list(
+                self.db.scalars(
+                    select(HREmploymentState).where(
+                        HREmploymentState.worker_key == run.worker_key
+                    )
+                ).all()
+            )
+            if any(state.status == "active" for state in states):
+                continue
+            records, mappings = self._records_and_mappings(run.worker_key)
+            if self._ad_plan(records, mappings) is not None:
+                continue
+            run.status = "success"
+            run.last_error = ""
+            run.completed_at = run.completed_at or run.created_at or utcnow()
+            run.cancelled_at = None
+            run.updated_at = utcnow()
+            repaired += 1
+        if repaired:
+            self.db.commit()
+        return repaired
 
     @staticmethod
     def _post_reconcile_target(run: FinalDismissalBlockRun) -> str:
@@ -715,11 +759,25 @@ class FinalDismissalLifecycleService:
                 )
             )
 
-        if not plans:
-            run.status = "intervention"
-            run.last_error = (
-                "Не найдена связанная учетная запись AD"
+        has_existing_targets = bool(
+            self.db.scalar(
+                select(FinalDismissalBlockTarget.id)
+                .where(FinalDismissalBlockTarget.run_id == run.id)
+                .limit(1)
             )
+        )
+        if not plans and not has_existing_targets:
+            # Подтвержденное окончательное увольнение без связанной учетки AD
+            # является корректным пустым действием: блокировать нечего. Старые
+            # run до этого исправления зависали в intervention и оставались в
+            # «Ближайших увольнениях». Для них сохраняем исходный created_at как
+            # фактический момент первой попытки, чтобы переход в журнал не
+            # откладывался еще на сутки после установки исправления.
+            run.status = "success"
+            run.last_error = ""
+            run.completed_at = run.completed_at or run.created_at or utcnow()
+            run.cancelled_at = None
+            run.updated_at = utcnow()
 
         self.db.commit()
         self.db.refresh(run)
@@ -875,6 +933,11 @@ class FinalDismissalLifecycleService:
     ) -> None:
         targets = self._targets(run.id)
         if not targets:
+            if run.status == "success" and run.completed_at is not None:
+                run.last_error = ""
+                run.cancelled_at = None
+                run.updated_at = utcnow()
+                return
             run.status = "intervention"
             run.last_error = (
                 run.last_error
@@ -1009,11 +1072,13 @@ class FinalDismissalLifecycleService:
                 "runs": 0,
                 "targets": 0,
             }
+        repaired = self._repair_legacy_no_account_runs()
         if not self._ready():
             return {
                 "status": "sources_not_ready",
                 "runs": 0,
                 "targets": 0,
+                "repaired": repaired,
             }
 
         self._create_reactivation_alerts()
@@ -1110,6 +1175,7 @@ class FinalDismissalLifecycleService:
             "status": "ok",
             "runs": runs_touched,
             "targets": targets_processed,
+            "repaired": repaired,
         }
 
     def _create_reactivation_alerts(self) -> None:
