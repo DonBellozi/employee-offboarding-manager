@@ -723,6 +723,126 @@ def resolve_employee_arrival_accounts(
         )
 
 
+@router.get("/employees/arrivals/accounts/create-missing-ad")
+def create_missing_arrival_ad_form(
+    request: Request,
+    arrival_event_ids: str,
+    zimbra_email: str,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    get_current_user(request)
+    try:
+        prepared = EmployeeArrivalAccountService(
+            settings,
+            db,
+        ).prepare_missing_ad(
+            raw_event_ids=arrival_event_ids,
+            zimbra_email=zimbra_email,
+        )
+        return templates.TemplateResponse(
+            request,
+            "ad_only_confirm.html",
+            _context(
+                request,
+                preflight=prepared["preflight"],
+                confirmation=None,
+                error="",
+                dry_run=settings.dry_run,
+                arrival_mode=True,
+                arrival_event_ids=arrival_event_ids,
+                arrival_zimbra_email=zimbra_email,
+                arrival_mailbox_status=prepared["mailbox_status"],
+            ),
+        )
+    except Exception as exc:
+        db.rollback()
+        return templates.TemplateResponse(
+            request,
+            "ad_only_confirm.html",
+            _context(
+                request,
+                preflight=None,
+                confirmation=None,
+                error=str(exc),
+                dry_run=settings.dry_run,
+                arrival_mode=True,
+                arrival_event_ids=arrival_event_ids,
+                arrival_zimbra_email=zimbra_email,
+                arrival_mailbox_status="",
+            ),
+            status_code=400,
+        )
+
+
+@router.post("/employees/arrivals/accounts/create-missing-ad")
+def create_missing_arrival_ad(
+    request: Request,
+    arrival_event_ids: str = Form(...),
+    zimbra_email: str = Form(...),
+    confirm_name_candidates: str = Form("false"),
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    user = get_current_user(request)
+    confirmed = confirm_name_candidates.strip().lower() == "true"
+    service = EmployeeArrivalAccountService(settings, db)
+    try:
+        outcome = service.create_missing_ad(
+            raw_event_ids=arrival_event_ids,
+            zimbra_email=zimbra_email,
+            actor=user.username,
+            confirm_name_candidates=confirmed,
+        )
+        response = templates.TemplateResponse(
+            request,
+            "ad_only_result.html",
+            _context(
+                request,
+                credentials=outcome["credentials"],
+                arrival_mode=True,
+                arrival_result=outcome["arrival_result"],
+                arrival_error=outcome["arrival_error"],
+                mailbox_restored=outcome["mailbox_restored"],
+                mailbox_email=outcome["mailbox_email"],
+            ),
+        )
+        response.headers["Cache-Control"] = (
+            "no-store, no-cache, must-revalidate, private"
+        )
+        response.headers["Pragma"] = "no-cache"
+        return response
+    except Exception as exc:
+        db.rollback()
+        try:
+            prepared = service.prepare_missing_ad(
+                raw_event_ids=arrival_event_ids,
+                zimbra_email=zimbra_email,
+            )
+        except Exception:
+            prepared = None
+        return templates.TemplateResponse(
+            request,
+            "ad_only_confirm.html",
+            _context(
+                request,
+                preflight=(prepared["preflight"] if prepared else None),
+                confirmation=None,
+                error=str(exc),
+                dry_run=settings.dry_run,
+                arrival_mode=True,
+                arrival_event_ids=arrival_event_ids,
+                arrival_zimbra_email=zimbra_email,
+                arrival_mailbox_status=(
+                    prepared["mailbox_status"] if prepared else ""
+                ),
+            ),
+            status_code=400,
+        )
+
+
 @router.post("/employees/parse")
 def parse_employee(
     request: Request,

@@ -382,7 +382,14 @@ class ProvisioningService:
                 EmailLoginMapping.worker_key == record.worker_key
             )
         ).all()
-        has_mapping = bool(mappings)
+        # Сопоставление только с Zimbra как раз означает, что AD может быть
+        # недостающей частью комплекта. Блокируем создание лишь когда в
+        # сохраненном соответствии уже указана AD-учетка.
+        has_mapping = any(
+            str(mapping.ad_object_guid or "").strip()
+            or str(mapping.ad_login or "").strip()
+            for mapping in mappings
+        )
 
         zimbra_identity = self.zimbra.account_by_address(corporate_email)
         if zimbra_identity is None:

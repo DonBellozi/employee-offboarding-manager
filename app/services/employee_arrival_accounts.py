@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unicodedata
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -244,6 +245,12 @@ class EmployeeArrivalAccountService:
         selected_zimbra = (
             zimbra_rows[0] if len(zimbra_rows) == 1 else None
         )
+        mail_only = bool(selected_zimbra is not None and not ad_rows)
+        can_create_missing_ad = bool(
+            mail_only
+            and self.settings.ad_check_enabled
+            and self.settings.zimbra_check_enabled
+        )
         unique_pair = selected_ad is not None and selected_zimbra is not None
         pair_active = bool(
             unique_pair
@@ -273,6 +280,23 @@ class EmployeeArrivalAccountService:
             "unique_pair": unique_pair,
             "pair_active": pair_active,
             "pair_restorable": pair_restorable,
+            "mail_only": mail_only,
+            "create_missing_ad_url": (
+                "/employees/arrivals/accounts/create-missing-ad?"
+                + urlencode(
+                    {
+                        "arrival_event_ids": context["event_ids_value"],
+                        "zimbra_email": selected_zimbra["primary_email"],
+                    }
+                )
+                if can_create_missing_ad
+                else ""
+            ),
+            "create_missing_ad_label": (
+                "Восстановить почту и создать AD"
+                if mail_only and selected_zimbra["status"] == "closed"
+                else "Создать недостающую AD"
+            ),
             "suggested_ad_login": (
                 str(selected_ad["username"])
                 if selected_ad is not None
@@ -283,6 +307,219 @@ class EmployeeArrivalAccountService:
                 if selected_zimbra is not None
                 else next(iter(context["corporate_emails"]), "")
             ),
+        }
+
+    def _zimbra_conflict(
+        self,
+        *,
+        worker_key: str,
+        zimbra: ZimbraAccountIdentity,
+    ) -> EmailLoginMapping | None:
+        stable_id = normalize_email(zimbra.zimbra_id)
+        for mapping in self.db.scalars(
+            select(EmailLoginMapping).where(
+                EmailLoginMapping.worker_key != worker_key
+            )
+        ).all():
+            if stable_id and normalize_email(mapping.zimbra_id) == stable_id:
+                return mapping
+        return None
+
+    @staticmethod
+    def _record_for_mailbox(
+        context: dict[str, object],
+        zimbra: ZimbraAccountIdentity,
+    ) -> HRSourceRecord:
+        addresses = {
+            normalize_email(value)
+            for value in (
+                zimbra.primary_email,
+                *zimbra.addresses,
+            )
+            if normalize_email(value)
+        }
+        records = [
+            record
+            for record in context["records"]
+            if normalize_email(record.corporate_email) in addresses
+        ]
+        if not records:
+            raise ValueError(
+                "Выбранный почтовый ящик не относится к текущей кадровой "
+                "записи работника"
+            )
+        if len(records) > 1:
+            raise ValueError(
+                "Один почтовый ящик найден сразу в нескольких организациях. "
+                "Сначала уточните кадровое сопоставление."
+            )
+        return records[0]
+
+    def prepare_missing_ad(
+        self,
+        *,
+        raw_event_ids: str,
+        zimbra_email: str,
+    ) -> dict[str, object]:
+        """Проверить создание только AD для найденного почтового ящика."""
+        from app.services.provisioning import ProvisioningService
+
+        if not self.settings.ad_check_enabled:
+            raise ValueError("Проверка и создание AD отключены в настройках")
+        if not self.settings.zimbra_check_enabled:
+            raise ValueError("Проверка Zimbra отключена в настройках")
+
+        context = EmployeeArrivalService(self.db).registration_context(
+            raw_event_ids
+        )
+        normalized_email = normalize_email(zimbra_email)
+        if not normalized_email or "@" not in normalized_email:
+            raise ValueError("Укажите существующий корпоративный адрес")
+
+        zimbra = ZimbraService(self.settings).account_by_address(
+            normalized_email
+        )
+        if zimbra is None:
+            raise ValueError(
+                f"Zimbra: ящик {normalized_email} больше не найден"
+            )
+        if not zimbra.zimbra_id:
+            raise ValueError("Zimbra не вернула zimbraId почтового ящика")
+        status = normalize_email(zimbra.account_status)
+        if status not in {"active", "closed"}:
+            raise ValueError(
+                "Использовать можно только активный или закрытый почтовый "
+                f"ящик; текущий статус — {status or 'не указан'}"
+            )
+        if self._zimbra_conflict(
+            worker_key=str(context["worker_key"]),
+            zimbra=zimbra,
+        ) is not None:
+            raise ValueError(
+                "Выбранный почтовый ящик уже сопоставлен с другим работником"
+            )
+
+        record = self._record_for_mailbox(context, zimbra)
+        preflight = ProvisioningService(
+            self.settings
+        ).prepare_ad_for_existing_mailbox(
+            self.db,
+            record.id,
+        )
+        return {
+            "context": context,
+            "record": record,
+            "mailbox": zimbra,
+            "mailbox_status": status,
+            "preflight": preflight,
+        }
+
+    def create_missing_ad(
+        self,
+        *,
+        raw_event_ids: str,
+        zimbra_email: str,
+        actor: str,
+        confirm_name_candidates: bool = False,
+    ) -> dict[str, object]:
+        """Открыть старую почту, создать недостающую AD и закрыть событие."""
+        from app.services.provisioning import ProvisioningService
+
+        prepared = self.prepare_missing_ad(
+            raw_event_ids=raw_event_ids,
+            zimbra_email=zimbra_email,
+        )
+        preflight = prepared["preflight"]
+        if not preflight.can_create:
+            raise RuntimeError(preflight.block_reason)
+        if preflight.name_candidates and not confirm_name_candidates:
+            raise RuntimeError(
+                "В AD найдены возможные совпадения по ФИО. "
+                "Выберите существующую учетную запись либо подтвердите "
+                "создание новой."
+            )
+
+        mailbox = prepared["mailbox"]
+        mailbox_restored = False
+        if (
+            prepared["mailbox_status"] == "closed"
+            and not self.settings.dry_run
+        ):
+            zimbra_service = ZimbraService(self.settings)
+            zimbra_service.open_account(mailbox.primary_email)
+            mailbox = zimbra_service.account_by_address(
+                mailbox.primary_email
+            )
+            if (
+                mailbox is None
+                or normalize_email(mailbox.account_status) != "active"
+            ):
+                raise RuntimeError(
+                    "Zimbra не подтвердила открытие почтового ящика"
+                )
+            mailbox_restored = True
+            self.db.add(
+                AuditLog(
+                    actor=actor,
+                    action="new_employment_mailbox_restored_for_ad",
+                    target=mailbox.primary_email,
+                    result="success",
+                    details=json.dumps(
+                        {
+                            "worker_key": prepared["context"]["worker_key"],
+                            "event_ids": prepared["context"]["event_ids"],
+                            "zimbra_id": mailbox.zimbra_id,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                )
+            )
+            self.db.commit()
+
+        credentials = ProvisioningService(
+            self.settings
+        ).provision_ad_for_existing_mailbox(
+            self.db,
+            actor,
+            prepared["record"].id,
+            confirm_name_candidates=confirm_name_candidates,
+        )
+        arrival_result = None
+        arrival_error = ""
+        if credentials.dry_run:
+            arrival_error = (
+                "DRY_RUN: кадровое уведомление осталось открытым, "
+                "поскольку реальные учетные записи не изменялись."
+            )
+        elif not credentials.ad_created or not credentials.ad_enabled:
+            arrival_error = (
+                "Кадровое уведомление осталось открытым: создание или "
+                "включение AD завершилось не полностью."
+            )
+        else:
+            try:
+                arrival_result = self.resolve(
+                    raw_event_ids=raw_event_ids,
+                    ad_login=credentials.ad_login,
+                    zimbra_email=mailbox.primary_email,
+                    actor=actor,
+                    restore_closed=False,
+                    provisioning_operation_id=credentials.operation_id,
+                )
+            except Exception as exc:
+                self.db.rollback()
+                arrival_error = (
+                    "AD создана, но уведомление о возвращении осталось "
+                    f"открытым: {exc}"
+                )
+
+        return {
+            "credentials": credentials,
+            "arrival_result": arrival_result,
+            "arrival_error": arrival_error,
+            "mailbox_restored": mailbox_restored,
+            "mailbox_email": mailbox.primary_email,
         }
 
     def _conflict(

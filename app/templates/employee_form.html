@@ -60,10 +60,18 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
 </script>
 {% elif arrival_accounts|default(None) and arrival_accounts.has_candidates and not force_new|default(false) %}
 <section class="card">
-  <h2>Найдены существующие учётные записи</h2>
+  <h2>
+    {{ 'Найден только почтовый ящик' if arrival_accounts.mail_only else 'Найдены существующие учётные записи' }}
+  </h2>
   <p>
+    {% if arrival_accounts.mail_only %}
+    У {{ arrival_accounts.fio }} сохранился корпоративный почтовый ящик, но
+    учетная запись AD не найдена. Можно создать только недостающую AD либо
+    выбрать другую существующую учетную запись.
+    {% else %}
     {{ arrival_accounts.fio }} уже работал в компании либо учётные записи были
     созданы заранее. Выберите существующие AD и почту, чтобы не создавать дубль.
+    {% endif %}
   </p>
 
   {% if arrival_accounts.errors %}
@@ -113,14 +121,14 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
 </section>
 
 <section class="card">
-  <h2>Выбор оператора</h2>
+  <h2>{{ 'Выбрать существующую AD' if arrival_accounts.mail_only else 'Выбор оператора' }}</h2>
   <form method="post"
         action="/employees/arrivals/accounts/resolve"
         class="stack">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids }}">
     <div class="grid two">
-      <label>Логин AD
+      <label>{{ 'Логин существующей AD' if arrival_accounts.mail_only else 'Логин AD' }}
         <input type="text"
                name="ad_login"
                list="arrival-ad-candidates"
@@ -148,10 +156,21 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
       </label>
     </div>
     <p class="muted">
+      {% if arrival_accounts.mail_only %}
+      Если работнику уже назначили другую AD, укажите ее логин. Система
+      проверит учетную запись, при необходимости восстановит доступ и сохранит
+      связь с найденным почтовым ящиком.
+      {% else %}
       Можно ввести логин и адрес вручную, если новые реквизиты уже назначены.
       Пароли для сопоставления не нужны и системой не считываются.
+      {% endif %}
     </p>
     <div class="actions">
+      {% if arrival_accounts.mail_only %}
+      <button class="button secondary" type="submit" name="action" value="restore">
+        Выбрать существующую AD
+      </button>
+      {% else %}
       {% if arrival_accounts.pair_restorable %}
       <button type="submit" name="action" value="restore">
         Восстановить и принять
@@ -166,8 +185,16 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
       </button>
       {% endif %}
       {% endif %}
+      {% endif %}
     </div>
   </form>
+  {% if arrival_accounts.mail_only and arrival_accounts.create_missing_ad_url %}
+  <div class="actions">
+    <a class="button" href="{{ arrival_accounts.create_missing_ad_url }}">
+      {{ arrival_accounts.create_missing_ad_label }}
+    </a>
+  </div>
+  {% endif %}
 </section>
 
 <section class="card">

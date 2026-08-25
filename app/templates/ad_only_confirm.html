@@ -19,13 +19,19 @@ function submitAdOnlyOnce(form) {
 {% block content %}
 <div class="heading-row">
   <div>
-    <h1>Создание учетной записи Active Directory</h1>
+    <h1>{{ 'Возвращение работника: недостающая AD' if arrival_mode|default(false) else 'Создание учетной записи Active Directory' }}</h1>
     <p class="muted">
+      {% if arrival_mode|default(false) %}
+      Почтовый ящик уже существует. Можно выбрать найденную учетную запись AD
+      либо создать только недостающую AD без второго ящика.
+      {% else %}
       Существующий почтовый ящик Zimbra не изменяется. Логин AD берется
       строго из части e-mail до символа @.
+      {% endif %}
     </p>
   </div>
-  <a class="button secondary" href="/employees/registry">Назад в реестр</a>
+  <a class="button secondary"
+     href="{{ '/employees/new?arrival_event_ids=' ~ arrival_event_ids if arrival_mode|default(false) else '/employees/registry' }}">Назад</a>
 </div>
 
 {% if dry_run %}
@@ -67,11 +73,16 @@ function submitAdOnlyOnce(form) {
 </section>
 
 <div class="alert warning ad-only-safety">
+  {% if arrival_mode|default(false) and arrival_mailbox_status|default('') == 'closed' %}
+  Перед созданием AD закрытый почтовый ящик будет открыт, чтобы получить письмо
+  с реквизитами. Затем будет создана только учетная запись Active Directory.
+  {% else %}
   Будет создана только учетная запись Active Directory. Для нее будут применены
   те же параметры, что и в разделе «Создание»: атрибуты ФИО и mail, настроенные
   группы, действующие правила пароля, бессрочный пароль согласно текущей
   настройке и последующее включение учетной записи. После создания реквизиты AD
   будут отправлены на <strong>{{ preflight.corporate_email }}</strong>.
+  {% endif %}
 </div>
 
 {% if preflight.block_reason %}
@@ -100,12 +111,19 @@ function submitAdOnlyOnce(form) {
         </div>
       </div>
       <div class="ad-candidate-actions">
-        <form method="post" action="/employees/registry/{{ preflight.record_id }}/confirm-ad">
+        <form method="post" action="{{ '/employees/arrivals/accounts/resolve' if arrival_mode|default(false) else '/employees/registry/' ~ preflight.record_id ~ '/confirm-ad' }}">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="ad_login" value="{{ candidate.username }}">
-          <button class="button small" type="submit">Подтвердить</button>
+          {% if arrival_mode|default(false) %}
+          <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids }}">
+          <input type="hidden" name="zimbra_email" value="{{ arrival_zimbra_email }}">
+          <input type="hidden" name="action" value="restore">
+          {% endif %}
+          <button class="button small" type="submit">{{ 'Выбрать и восстановить' if arrival_mode|default(false) else 'Подтвердить' }}</button>
         </form>
+        {% if not arrival_mode|default(false) %}
         <a class="button secondary small" href="{{ candidate.mapping_url }}">Сопоставить</a>
+        {% endif %}
       </div>
     </div>
     {% endfor %}
@@ -134,12 +152,19 @@ function submitAdOnlyOnce(form) {
         </div>
       </div>
       <div class="ad-candidate-actions">
-        <form method="post" action="/employees/registry/{{ preflight.record_id }}/confirm-ad">
+        <form method="post" action="{{ '/employees/arrivals/accounts/resolve' if arrival_mode|default(false) else '/employees/registry/' ~ preflight.record_id ~ '/confirm-ad' }}">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="ad_login" value="{{ candidate.username }}">
-          <button class="button small" type="submit">Подтвердить</button>
+          {% if arrival_mode|default(false) %}
+          <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids }}">
+          <input type="hidden" name="zimbra_email" value="{{ arrival_zimbra_email }}">
+          <input type="hidden" name="action" value="restore">
+          {% endif %}
+          <button class="button small" type="submit">{{ 'Выбрать и восстановить' if arrival_mode|default(false) else 'Подтвердить' }}</button>
         </form>
+        {% if not arrival_mode|default(false) %}
         <a class="button secondary small" href="{{ candidate.mapping_url }}">Сопоставить</a>
+        {% endif %}
       </div>
     </div>
     {% endfor %}
@@ -148,11 +173,15 @@ function submitAdOnlyOnce(form) {
 {% endif %}
 
 {% if preflight.can_create %}
-<form method="post"
-      action="/employees/registry/{{ preflight.record_id }}/create-ad"
+  <form method="post"
+      action="{{ '/employees/arrivals/accounts/create-missing-ad' if arrival_mode|default(false) else '/employees/registry/' ~ preflight.record_id ~ '/create-ad' }}"
       class="card ad-only-create-form"
       onsubmit="return submitAdOnlyOnce(this);">
   <input type="hidden" name="csrf" value="{{ csrf }}">
+  {% if arrival_mode|default(false) %}
+  <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids }}">
+  <input type="hidden" name="zimbra_email" value="{{ arrival_zimbra_email }}">
+  {% endif %}
   {% if preflight.name_candidates %}
   <label class="check-row ad-only-confirm-check">
     <input type="checkbox" name="confirm_name_candidates" value="true" required>
@@ -167,7 +196,8 @@ function submitAdOnlyOnce(form) {
 
   <div class="actions ad-only-actions">
     <button class="button" type="submit" data-create-ad-submit>Создать AD</button>
-    <a class="button secondary" href="/employees/registry">Отмена</a>
+    <a class="button secondary"
+       href="{{ '/employees/new?arrival_event_ids=' ~ arrival_event_ids if arrival_mode|default(false) else '/employees/registry' }}">Отмена</a>
   </div>
 </form>
 {% endif %}

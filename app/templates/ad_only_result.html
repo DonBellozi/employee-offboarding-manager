@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Учетная запись AD создана{% endblock %}
 {% block content %}
-<h1>Создание учетной записи Active Directory</h1>
+<h1>{{ 'Возвращение работника: учетные записи дополнены' if arrival_mode|default(false) else 'Создание учетной записи Active Directory' }}</h1>
 
 {% if credentials.dry_run %}
 <div class="alert warning">
@@ -18,8 +18,20 @@
 </div>
 {% else %}
 <div class="alert success">
+  {% if arrival_mode|default(false) and arrival_result|default(None) %}
+  Недостающая учетная запись AD создана, почтовый ящик сохранен, а уведомление
+  о возвращении работника обработано.
+  {% else %}
   Учетная запись Active Directory создана, включена, а реквизиты отправлены
   на существующую корпоративную почту.
+  {% endif %}
+</div>
+{% endif %}
+
+{% if arrival_error|default('') %}
+<div class="alert warning">
+  <strong>Возвращение обработано не полностью.</strong><br>
+  {{ arrival_error }}
 </div>
 {% endif %}
 
@@ -47,6 +59,14 @@
       Требует повторной проверки
       {% endif %}
     </strong>
+    {% if arrival_mode|default(false) %}
+    <span>Почтовый ящик</span>
+    <strong>
+      {{ mailbox_email }} — {{ 'восстановлен' if mailbox_restored else 'сохранен активным' }}
+    </strong>
+    <span>Уведомление о возвращении</span>
+    <strong>{{ 'Обработано' if arrival_result else 'Осталось открытым' }}</strong>
+    {% endif %}
   </div>
 </section>
 
@@ -60,7 +80,7 @@
 
 <div class="actions">
   <button type="button" onclick="copyADCredentials(this)">Скопировать</button>
-  <a class="button secondary" href="/employees/registry">Вернуться в реестр</a>
+  <a class="button secondary" href="{{ '/' if arrival_mode|default(false) else '/employees/registry' }}">{{ 'Вернуться на главную' if arrival_mode|default(false) else 'Вернуться в реестр' }}</a>
 </div>
 <p class="muted">
   Пароль показан только на этой странице и не сохраняется в базе или журнале.
@@ -122,7 +142,7 @@ async function copyADCredentials(button) {
 </script>
 {% else %}
 <div class="actions">
-  <a class="button secondary" href="/employees/registry">Вернуться в реестр</a>
+  <a class="button secondary" href="{{ '/' if arrival_mode|default(false) else '/employees/registry' }}">{{ 'Вернуться на главную' if arrival_mode|default(false) else 'Вернуться в реестр' }}</a>
 </div>
 {% endif %}
 {% endblock %}
