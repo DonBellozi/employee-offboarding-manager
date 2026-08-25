@@ -74,6 +74,7 @@
 <section class="card credentials ad-only-copy-card">
   <h2>Реквизиты</h2>
   <div class="credential-row"><span>ФИО</span><strong>{{ credentials.full_name }}</strong></div>
+  <div class="credential-row"><span>Логин AD</span><code>{{ credentials.ad_login }}</code></div>
   <div class="credential-row"><span>E-mail</span><code>{{ credentials.corporate_email }}</code></div>
   <div class="credential-row"><span>Пароль</span><code>{{ credentials.ad_password }}</code></div>
 </section>
@@ -119,6 +120,7 @@ async function writePlainTextToClipboard(text) {
 async function copyADCredentials(button) {
   const lines = [
     {{ credentials.full_name|tojson }},
+    {{ credentials.ad_login|tojson }},
     {{ credentials.corporate_email|tojson }},
     {{ credentials.ad_password|tojson }},
   ];

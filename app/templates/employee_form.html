@@ -190,7 +190,9 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
   </form>
   {% if arrival_accounts.mail_only and arrival_accounts.create_missing_ad_url %}
   <div class="actions">
-    <a class="button" href="{{ arrival_accounts.create_missing_ad_url }}">
+    <a class="button"
+       href="{{ arrival_accounts.create_missing_ad_url }}"
+       data-workspace-navigate>
       {{ arrival_accounts.create_missing_ad_label }}
     </a>
   </div>

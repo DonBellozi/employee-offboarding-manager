@@ -82,6 +82,14 @@
 
           event.preventDefault();
           event.stopPropagation();
+
+          // Explicitly marked action steps continue inside the same workspace.
+          // All other links keep the historical behavior and close the modal.
+          if (link.hasAttribute('data-workspace-navigate')) {
+            childWindow.location.href = modalUrl(href);
+            return;
+          }
+
           closeWorkspace();
         });
       }
