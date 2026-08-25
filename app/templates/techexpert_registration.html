@@ -4,11 +4,20 @@
 <link rel="stylesheet" href="/static/techexpert_registration.css">
 {% set status_labels = {
   'draft': 'Подготовлен',
+  'queued': 'В очереди',
   'processing': 'Выполняется',
   'sent': 'Выполнен',
   'partial': 'Письмо не отправлено',
   'failed': 'Ошибка',
   'stale': 'Данные изменились',
+  'dry_run': 'Тестовый режим'
+} %}
+{% set email_status_labels = {
+  'not_started': 'Ожидает',
+  'queued': 'В очереди',
+  'failed': 'Ошибка отправки',
+  'not_sent': 'Не отправлено',
+  'sent': 'Отправлено',
   'dry_run': 'Тестовый режим'
 } %}
 
@@ -30,6 +39,71 @@
 <div class="alert warning">
   Сначала настройте организацию, группу AD и получателя уведомлений Техэксперта.
 </div>
+{% endif %}
+{% if not techexpert.enabled %}
+<div class="alert warning">
+  Автоматические уведомления Техэксперта выключены. Запросы можно поставить в
+  очередь, но по расписанию они не уйдут; администратор сможет отправить их
+  вручную.
+</div>
+{% endif %}
+
+{% if queue %}
+<section class="card te-registration-history">
+  <div class="te-registration-heading">
+    <div>
+      <h2>Очередь на отправку — {{ queue|length }}</h2>
+      <p class="muted">
+        Все готовые запросы уйдут одним письмом в настроенное время отправки.
+        {% if is_admin %}При необходимости отдельный запрос можно отправить немедленно.{% endif %}
+      </p>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Работник</th><th>Запрос</th><th>Плановая отправка</th><th>Состояние</th><th></th></tr>
+      </thead>
+      <tbody>
+      {% for item in queue %}
+        <tr>
+          <td>
+            <strong>{{ item.fio }}</strong>
+            <div class="muted">{{ item.department }} · {{ item.ad_login }}</div>
+          </td>
+          <td>{{ 'Восстановление' if item.request_kind == 'recovery' else 'Регистрация' }}</td>
+          <td>
+            {{ item.scheduled_for|app_datetime('%d.%m.%Y %H:%M') if item.scheduled_for else '–' }}
+            {% if item.next_attempt_at %}
+            <div class="muted">Повтор: {{ item.next_attempt_at|app_datetime('%d.%m.%Y %H:%M') }}</div>
+            {% endif %}
+          </td>
+          <td>
+            {{ status_labels.get(item.status, item.status) }}
+            {% if item.last_error %}<div class="registry-error">{{ item.last_error }}</div>{% endif %}
+          </td>
+          <td>
+            <div class="table-actions">
+              <form method="get" action="/techexpert/registration">
+                <input type="hidden" name="registration_id" value="{{ item.id }}">
+                <button class="button small secondary" type="submit">Открыть</button>
+              </form>
+              {% if is_admin and item.status == 'queued' %}
+              <form method="post"
+                    action="/techexpert/registration/{{ item.id }}/send-now"
+                    onsubmit="return confirm('Отправить этот запрос Техэксперту немедленно?');">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <button class="button small" type="submit">Отправить</button>
+              </form>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
 {% endif %}
 
 {% if registration %}
@@ -92,12 +166,12 @@
     </div>
     <div>
       <span>Письмо</span>
-      <strong>{{ registration.email_status }}</strong>
+      <strong>{{ email_status_labels.get(registration.email_status, registration.email_status) }}</strong>
       {% if registration.email_error %}<small>{{ registration.email_error }}</small>{% endif %}
     </div>
   </div>
 
-  {% if registration.status not in ['sent', 'stale', 'processing'] %}
+  {% if registration.status not in ['sent', 'stale', 'processing', 'queued'] %}
   <form method="post"
         action="/techexpert/registration/{{ registration.id }}/execute"
         class="te-registration-confirm-form">
@@ -105,22 +179,28 @@
     <div class="alert warning">
       {% if is_recovery %}
       Система повторно проверит кадровое состояние и участие в группе AD, затем
-      отправит запрос на восстановление логина и пароля. Группа AD не изменяется.
+      поставит запрос на восстановление в общую очередь. Группа AD не изменяется.
       {% else %}
       Система повторно проверит кадровое состояние и AD, добавит работника в
-      группу Техэксперта и только затем отправит письмо.
+      группу Техэксперта и поставит письмо в общую очередь.
       {% endif %}
     </div>
     <button class="button" type="submit">
       {% if registration.status == 'partial' %}
         Повторить отправку письма
       {% elif is_recovery %}
-        Отправить запрос на восстановление
+        Поставить восстановление в очередь
       {% else %}
-        Добавить в группу и отправить запрос
+        Добавить в группу и поставить в очередь
       {% endif %}
     </button>
   </form>
+  {% elif registration.status == 'queued' %}
+  <div class="alert success">
+    Запрос находится в очереди и будет включён в ближайшее общее письмо
+    {{ registration.scheduled_for|app_datetime('%d.%m.%Y %H:%M') if registration.scheduled_for else '' }}.
+    {% if is_admin %}Срочная отправка доступна в таблице очереди выше.{% endif %}
+  </div>
   {% elif registration.status == 'stale' %}
   <form method="get" action="/techexpert/registration">
     <input type="hidden" name="record_id" value="{{ registration.hr_record_id }}">

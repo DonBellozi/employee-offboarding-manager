@@ -31,6 +31,9 @@ from app.services.techexpert_settings import (
     ensure_techexpert_settings,
     parse_notification_time,
 )
+from app.services.techexpert_registration import (
+    TechExpertRegistrationService,
+)
 from app.services.techexpert_access import (
     TechExpertGroupAccessService,
     placement_snapshot,
@@ -969,6 +972,21 @@ class TechExpertLifecycleWorker:
             except Exception:
                 db.rollback()
                 logger.exception("Ошибка уведомительного контура Техэксперта")
+            try:
+                config = ensure_techexpert_settings(db)
+                queued_sent = TechExpertRegistrationService(
+                    self.settings,
+                    db,
+                    config,
+                ).process_due_queue(actor="system")
+                if queued_sent:
+                    logger.info(
+                        "Техэксперт: отправлено заявок из очереди %s",
+                        queued_sent,
+                    )
+            except Exception:
+                db.rollback()
+                logger.exception("Ошибка очереди заявок Техэксперта")
 
     def _run_loop(self) -> None:
         while not self._stop_event.wait(POLL_SECONDS):

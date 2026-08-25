@@ -152,6 +152,20 @@
   font-weight: 700;
 }
 
+.te-registration-history .table-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.te-registration-history .registry-error {
+  max-width: 360px;
+  margin-top: 4px;
+  color: #b42318;
+  font-size: .82rem;
+}
+
 @media (max-width: 760px) {
   .te-registration-search,
   .te-registration-person,

@@ -479,11 +479,13 @@ def techexpert_registration_page(
         "techexpert_registration.html",
         {
             "user": current,
+            "is_admin": current.role == "admin",
             "csrf": get_or_create_csrf(request),
             "query": q,
             "results": results,
             "selected": selected,
             "registration": registration,
+            "queue": service.queue(),
             "history": service.history(),
             "techexpert": config,
             "message": request.query_params.get("message", ""),
@@ -550,24 +552,13 @@ def techexpert_registration_execute(
             config,
         ).execute(request_id=registration_id, actor=current.username)
         is_recovery = registration.request_kind == "recovery"
-        if registration.status == "sent":
+        if registration.status == "queued":
             message = (
-                "Запрос на восстановление доступа отправлен."
+                "Запрос на восстановление поставлен в очередь."
                 if is_recovery
-                else "Работник добавлен в группу, письмо отправлено."
+                else "Работник добавлен в группу, запрос поставлен в очередь."
             )
             error = ""
-        elif registration.status == "partial":
-            message = ""
-            error = (
-                "Письмо о восстановлении доступа не отправлено. "
-                "Исправьте SMTP и повторите отправку."
-                if is_recovery
-                else (
-                    "Работник добавлен в группу, но письмо не отправлено. "
-                    "Исправьте SMTP и повторите отправку."
-                )
-            )
         elif registration.status == "dry_run":
             message = "DRY_RUN: группа и почта не изменены."
             error = ""
@@ -584,6 +575,38 @@ def techexpert_registration_execute(
         return _registration_redirect(
             registration_id=registration_id,
             error=f"Запрос не выполнен: {exc}",
+        )
+
+
+@router.post("/techexpert/registration/{registration_id}/send-now")
+def techexpert_registration_send_now(
+    registration_id: int,
+    request: Request,
+    csrf: str = Form(...),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf(request, csrf)
+    current = require_admin(request)
+    try:
+        config = TechExpertSettingsService(settings, db).get()
+        registration = TechExpertRegistrationService(
+            settings,
+            db,
+            config,
+        ).send_now(request_id=registration_id, actor=current.username)
+        if registration.status == "sent":
+            return _registration_redirect(
+                message=f"Запрос для {registration.fio} отправлен вне очереди.",
+            )
+        return _registration_redirect(
+            registration_id=registration.id,
+            error=registration.last_error or "Запрос не отправлен",
+        )
+    except Exception as exc:
+        db.rollback()
+        return _registration_redirect(
+            error=f"Срочная отправка не выполнена: {exc}",
         )
 
 

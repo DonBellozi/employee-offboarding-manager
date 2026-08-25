@@ -161,6 +161,9 @@ def ensure_compatibility_schema() -> None:
                 "request_kind": (
                     "VARCHAR(32) NOT NULL DEFAULT 'registration'"
                 ),
+                "queued_at": "DATETIME",
+                "scheduled_for": "DATETIME",
+                "next_attempt_at": "DATETIME",
             },
         )
         add_missing_columns(

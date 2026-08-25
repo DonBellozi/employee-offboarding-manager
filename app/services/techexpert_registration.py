@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 from html import escape
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -26,15 +28,25 @@ from app.services.mailer import (
     render_mail_template,
 )
 from app.services.techexpert_access import normalize_email, normalize_fio, normalize_text
-from app.services.techexpert_settings import normalize_email as validate_email
+from app.services.techexpert_settings import (
+    normalize_email as validate_email,
+    parse_notification_time,
+)
 
 
 ACTIVE_EMPLOYMENT_STATUSES = {"active", "scheduled"}
 DEPARTMENT_SEPARATOR = " / "
+QUEUE_RETRY_MINUTES = 15
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def preview_document(body_html: str) -> str:
@@ -166,6 +178,20 @@ class TechExpertRegistrationService:
             raise ValueError("Не настроена тема письма о восстановлении доступа")
         if not str(self.config.recovery_body_html or "").strip():
             raise ValueError("Не настроен шаблон письма о восстановлении доступа")
+        parse_notification_time(self.config.notification_time)
+
+    def _next_queue_time(self, value: datetime | None = None) -> datetime:
+        now_local = aware_utc(value or utcnow()).astimezone(
+            ZoneInfo(self.settings.app_timezone)
+        )
+        candidate = datetime.combine(
+            now_local.date(),
+            parse_notification_time(self.config.notification_time),
+            tzinfo=now_local.tzinfo,
+        )
+        if candidate < now_local:
+            candidate += timedelta(days=1)
+        return candidate.astimezone(timezone.utc)
 
     def _active_states(self) -> dict[str, HREmploymentState]:
         if not self.source_id:
@@ -569,6 +595,8 @@ class TechExpertRegistrationService:
         request = self.get_request(request_id)
         if request.email_status == "sent":
             return request
+        if request.status == "queued":
+            return request
         if request.status == "processing":
             raise ValueError("Этот запрос уже выполняется")
 
@@ -695,29 +723,307 @@ class TechExpertRegistrationService:
             self.db.commit()
             return request
 
-        try:
-            CredentialMailer(self.settings).send_html(
-                recipient=request.recipient_email,
-                subject=request.subject,
-                body_html=request.body_html,
-                sender_email=request.sender_email,
-                sender_name=request.sender_name,
-            )
-            request.email_status = "sent"
-            request.email_error = ""
-            request.status = "sent"
-            request.sent_at = utcnow()
-            request.last_error = ""
-        except Exception as exc:
-            request.email_status = "failed"
-            request.email_error = str(exc)
-            request.status = "partial"
-            request.last_error = str(exc)
-        request.updated_at = utcnow()
+        queued_at = utcnow()
+        request.status = "queued"
+        request.email_status = "queued"
+        request.email_error = ""
+        request.last_error = ""
+        request.queued_at = queued_at
+        request.scheduled_for = self._next_queue_time(queued_at)
+        request.next_attempt_at = None
+        request.updated_at = queued_at
         self._audit_result(request, actor)
         self.db.commit()
         self.db.refresh(request)
         return request
+
+    @staticmethod
+    def _mail_fragment(body_html: str) -> str:
+        body = str(body_html or "").strip()
+        match = re.search(
+            r"<body\b[^>]*>(.*?)</body\s*>",
+            body,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            return match.group(1).strip()
+        body = re.sub(
+            r"<!doctype[^>]*>|</?html\b[^>]*>",
+            "",
+            body,
+            flags=re.IGNORECASE,
+        )
+        body = re.sub(
+            r"<head\b[^>]*>.*?</head\s*>",
+            "",
+            body,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        return body.strip()
+
+    def _batch_letter(
+        self,
+        requests: list[TechExpertRegistrationRequest],
+    ) -> tuple[str, str]:
+        if len(requests) == 1:
+            return requests[0].subject, requests[0].body_html
+        local_date = datetime.now(
+            ZoneInfo(self.settings.app_timezone)
+        ).strftime("%d.%m.%Y")
+        subject = (
+            f"Заявки в систему «Техэксперт» — {local_date} "
+            f"({len(requests)})"
+        )
+        sections = []
+        for index, request in enumerate(requests, start=1):
+            kind = (
+                "Восстановление доступа"
+                if request.request_kind == "recovery"
+                else "Регистрация"
+            )
+            sections.append(
+                '<section style="margin:0 0 28px;padding:0 0 24px;'
+                'border-bottom:1px solid #dbe2ea">'
+                f'<h2 style="font-size:18px;margin:0 0 14px">'
+                f"{index}. {escape(kind)} — {escape(request.fio)}</h2>"
+                f"{self._mail_fragment(request.body_html)}"
+                "</section>"
+            )
+        body_html = (
+            '<div style="font-family:Arial,sans-serif;color:#172033;'
+            'line-height:1.5">'
+            "<p>Здравствуйте!</p>"
+            f"<p>Направляем накопленные запросы в систему «Техэксперт»: "
+            f"{len(requests)}.</p>"
+            f"{''.join(sections)}"
+            "</div>"
+        )
+        return subject, body_html
+
+    def _mark_queue_retry(
+        self,
+        request: TechExpertRegistrationRequest,
+        error: Exception | str,
+    ) -> None:
+        message = str(error)
+        request.status = "queued"
+        request.email_status = "failed"
+        request.email_error = message
+        request.last_error = message
+        request.next_attempt_at = utcnow() + timedelta(
+            minutes=QUEUE_RETRY_MINUTES
+        )
+        request.updated_at = utcnow()
+
+    def _mark_queue_stale(
+        self,
+        request: TechExpertRegistrationRequest,
+        message: str,
+    ) -> None:
+        request.status = "stale"
+        request.email_status = "not_sent"
+        request.email_error = ""
+        request.last_error = message
+        request.next_attempt_at = None
+        request.updated_at = utcnow()
+
+    def _recheck_queued_request(
+        self,
+        request: TechExpertRegistrationRequest,
+    ) -> bool:
+        try:
+            record, _state = self.active_record(request.hr_record_id)
+        except Exception as exc:
+            self._mark_queue_stale(request, str(exc))
+            return False
+        if record.worker_key != request.worker_key or not self._snapshot_matches(
+            request,
+            record,
+        ):
+            self._mark_queue_stale(
+                request,
+                "Кадровые данные изменились после постановки в очередь. "
+                "Подготовьте запрос заново.",
+            )
+            return False
+        try:
+            ad_user = self._resolve_ad(record)
+        except Exception as exc:
+            self._mark_queue_retry(request, exc)
+            return False
+        if normalize_email(request.ad_login) != normalize_email(
+            ad_user.username
+        ):
+            self._mark_queue_stale(
+                request,
+                "Логин AD изменился после постановки в очередь. "
+                "Подготовьте запрос заново.",
+            )
+            return False
+        try:
+            is_member = self._is_group_member(ad_user)
+        except Exception as exc:
+            self._mark_queue_retry(request, exc)
+            return False
+        if not is_member:
+            record.techexpert_access = False
+            self._mark_queue_stale(
+                request,
+                "Работник больше не состоит в группе Техэксперта. "
+                "Запрос не отправлен.",
+            )
+            return False
+        record.techexpert_access = True
+        request.group_status = "already_member"
+        request.group_error = ""
+        return True
+
+    def _send_queued_requests(
+        self,
+        requests: list[TechExpertRegistrationRequest],
+        *,
+        actor: str,
+    ) -> int:
+        ready: list[TechExpertRegistrationRequest] = []
+        for request in requests:
+            if request.status != "queued":
+                continue
+            request.status = "processing"
+            request.attempts += 1
+            request.updated_at = utcnow()
+        self.db.commit()
+
+        for request in requests:
+            if request.status != "processing":
+                continue
+            if self._recheck_queued_request(request):
+                ready.append(request)
+            else:
+                self._audit_result(request, actor)
+        self.db.commit()
+        if not ready:
+            return 0
+
+        ready.sort(
+            key=lambda item: (
+                item.request_kind != "registration",
+                normalize_fio(item.fio),
+                item.id or 0,
+            )
+        )
+        subject, body_html = self._batch_letter(ready)
+        try:
+            profile = get_domain_mail_profile(
+                self.db,
+                self.settings,
+                self.source_id,
+            )
+            recipient = validate_email(
+                self.config.recipient_email,
+                field_name="получатель уведомлений",
+            )
+            CredentialMailer(self.settings).send_html(
+                recipient=recipient,
+                subject=subject,
+                body_html=body_html,
+                sender_email=profile.sender_email,
+                sender_name=profile.sender_name,
+            )
+        except Exception as exc:
+            for request in ready:
+                self._mark_queue_retry(request, exc)
+                self._audit_result(request, actor)
+            self.db.commit()
+            return 0
+
+        sent_at = utcnow()
+        for request in ready:
+            request.recipient_email = recipient
+            request.sender_email = profile.sender_email
+            request.sender_name = profile.sender_name
+            request.email_status = "sent"
+            request.email_error = ""
+            request.status = "sent"
+            request.sent_at = sent_at
+            request.last_error = ""
+            request.next_attempt_at = None
+            request.updated_at = sent_at
+            self._audit_result(request, actor)
+        self.db.commit()
+        return len(ready)
+
+    def send_now(
+        self,
+        *,
+        request_id: int,
+        actor: str,
+    ) -> TechExpertRegistrationRequest:
+        request = self.get_request(request_id)
+        if request.status != "queued":
+            raise ValueError("Немедленно отправить можно только запрос из очереди")
+        self._send_queued_requests([request], actor=actor)
+        self.db.refresh(request)
+        return request
+
+    def process_due_queue(self, *, actor: str = "system") -> int:
+        if not self.config.enabled or self.settings.dry_run:
+            return 0
+        self._require_configuration()
+        now = utcnow()
+        rows = list(
+            self.db.scalars(
+                select(TechExpertRegistrationRequest)
+                .where(
+                    TechExpertRegistrationRequest.source_id == self.source_id,
+                    TechExpertRegistrationRequest.status == "queued",
+                )
+                .order_by(
+                    TechExpertRegistrationRequest.scheduled_for,
+                    TechExpertRegistrationRequest.id,
+                )
+                .limit(100)
+            ).all()
+        )
+        for row in rows:
+            queued_at = row.queued_at or row.created_at
+            expected = self._next_queue_time(queued_at)
+            if (
+                row.scheduled_for is None
+                or aware_utc(row.scheduled_for) != expected
+            ):
+                row.scheduled_for = expected
+        self.db.commit()
+        due = [
+            row
+            for row in rows
+            if row.scheduled_for is not None
+            and aware_utc(row.scheduled_for) <= now
+            and (
+                row.next_attempt_at is None
+                or aware_utc(row.next_attempt_at) <= now
+            )
+        ]
+        return self._send_queued_requests(due, actor=actor) if due else 0
+
+    def queue(self, *, limit: int = 100) -> list[TechExpertRegistrationRequest]:
+        if not self.source_id:
+            return []
+        return list(
+            self.db.scalars(
+                select(TechExpertRegistrationRequest)
+                .where(
+                    TechExpertRegistrationRequest.source_id == self.source_id,
+                    TechExpertRegistrationRequest.status.in_(
+                        {"queued", "processing"}
+                    ),
+                )
+                .order_by(
+                    TechExpertRegistrationRequest.scheduled_for,
+                    TechExpertRegistrationRequest.id,
+                )
+                .limit(max(1, min(int(limit), 200)))
+            ).all()
+        )
 
     def history(self, *, limit: int = 20) -> list[TechExpertRegistrationRequest]:
         if not self.source_id:
@@ -725,7 +1031,12 @@ class TechExpertRegistrationService:
         return list(
             self.db.scalars(
                 select(TechExpertRegistrationRequest)
-                .where(TechExpertRegistrationRequest.source_id == self.source_id)
+                .where(
+                    TechExpertRegistrationRequest.source_id == self.source_id,
+                    TechExpertRegistrationRequest.status.not_in(
+                        {"queued", "processing"}
+                    ),
+                )
                 .order_by(TechExpertRegistrationRequest.id.desc())
                 .limit(max(1, min(int(limit), 100)))
             ).all()
