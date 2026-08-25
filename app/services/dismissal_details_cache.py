@@ -78,6 +78,7 @@ class DismissalDetailsCacheService:
             "dismissal_date": candidate["dismissal_date"].isoformat(),
             "effective_block_date": candidate["effective_block_date"].isoformat(),
             "deferred": bool(candidate.get("deferred")),
+            "preliminary": bool(candidate.get("preliminary")),
             "organizations": organizations,
         }
         encoded = json.dumps(
@@ -249,6 +250,7 @@ class DismissalDetailsCacheService:
             "fio": candidate["fio"],
             "dismissal_date": candidate["dismissal_date"],
             "organizations": candidate["organizations"],
+            "preliminary": bool(candidate.get("preliminary")),
             "rows": rows,
             "snapshot_state": state,
             "snapshot_checked_at": self._format_datetime(
@@ -295,9 +297,6 @@ class DismissalDetailsSnapshotWorker:
                     self.settings,
                     db,
                 ).list_upcoming(limit=1000)
-                candidates = [
-                    item for item in candidates if not item.get("preliminary")
-                ]
                 refreshed = 0
                 for candidate in candidates:
                     if self._stop_event.is_set():

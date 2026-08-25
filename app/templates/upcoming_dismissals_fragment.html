@@ -46,7 +46,18 @@
         </td>
         <td>
           {% if item.preliminary %}
-          <span class="muted">—</span>
+          {% if item.deferred %}
+          <span class="registry-state checked">Отложено</span>
+          <div class="muted">
+            При подтверждении — {{ item.deferred_until.strftime('%d.%m.%Y') }} в 19:10
+          </div>
+          {% if item.deferral_operator %}
+          <div class="muted">{{ item.deferral_operator }}</div>
+          {% endif %}
+          {% else %}
+          <span class="registry-state not_checked">Ожидает подтверждения</span>
+          <div class="muted">До кадровой выгрузки блокировок не будет</div>
+          {% endif %}
           {% elif not item.blocking_required %}
           <span class="registry-state checked">Не требуется</span>
           <div class="muted">Работа в другой организации продолжается</div>
@@ -72,7 +83,6 @@
           {% endif %}
         </td>
         <td class="upcoming-actions-cell">
-          {% if not item.preliminary %}
           <div class="upcoming-actions">
             <details class="journal-details upcoming-details"
                      data-upcoming-dismissal-details
@@ -85,7 +95,7 @@
                 <div class="upcoming-details-loading">Загружаю сохранённые данные…</div>
               </div>
             </details>
-          {% if item.blocking_required and not item.blocking_completed %}
+          {% if item.deferral_allowed %}
           <form method="post"
                 action="/dismissals/upcoming/defer"
                 data-upcoming-dismissal-defer>
@@ -93,13 +103,12 @@
             <input type="hidden" name="worker_key" value="{{ item.worker_key }}">
             <input type="hidden" name="dismissal_date" value="{{ item.dismissal_date.isoformat() }}">
             <button class="button secondary small" type="submit"
-                    title="Оператор проверил ситуацию. Отложить блокировку еще на семь дней.">
+                    title="{{ 'Если увольнение подтвердится, отложить блокировку на семь дней от даты увольнения.' if item.preliminary else 'Оператор проверил ситуацию. Отложить блокировку еще на семь дней.' }}">
               {{ 'Еще на неделю' if item.deferred else 'Отложить' }}
             </button>
           </form>
           {% endif %}
           </div>
-          {% endif %}
         </td>
       </tr>
       {% endfor %}

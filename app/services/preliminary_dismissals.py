@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import HRSourceRecord
+from app.models_dismissals import DismissalDeferral
 from app.models_notifications import (
     DismissalEquipmentNotice,
     HREmploymentDismissalEvent,
@@ -627,6 +628,67 @@ class PreliminaryDismissalService:
             .limit(1)
         )
 
+    def _move_deferral(
+        self,
+        *,
+        worker_key: str,
+        previous_date: date,
+        current_date: date,
+    ) -> None:
+        """Сохранить относительную отсрочку при переносе даты увольнения."""
+        if not worker_key or previous_date == current_date:
+            return
+        previous = self.db.scalar(
+            select(DismissalDeferral).where(
+                DismissalDeferral.worker_key == worker_key,
+                DismissalDeferral.dismissal_date == previous_date,
+            )
+        )
+        if previous is None:
+            return
+
+        offset_days = max(
+            0,
+            (previous.deferred_until - previous_date).days,
+        )
+        migrated_until = current_date + timedelta(days=offset_days)
+        current = self.db.scalar(
+            select(DismissalDeferral).where(
+                DismissalDeferral.worker_key == worker_key,
+                DismissalDeferral.dismissal_date == current_date,
+            )
+        )
+        if current is not None and current.id != previous.id:
+            if migrated_until >= current.deferred_until:
+                current.deferred_until = migrated_until
+                current.operator_username = previous.operator_username
+            current.deferral_count = max(
+                int(current.deferral_count or 0),
+                int(previous.deferral_count or 0),
+            )
+            current.updated_at = utcnow()
+            self.db.delete(previous)
+            return
+
+        previous.dismissal_date = current_date
+        previous.deferred_until = migrated_until
+        previous.updated_at = utcnow()
+
+    def _discard_unconfirmed_deferral(
+        self,
+        item: PreliminaryDismissalItem,
+    ) -> None:
+        if not item.worker_key:
+            return
+        deferral = self.db.scalar(
+            select(DismissalDeferral).where(
+                DismissalDeferral.worker_key == item.worker_key,
+                DismissalDeferral.dismissal_date == item.dismissal_date,
+            )
+        )
+        if deferral is not None:
+            self.db.delete(deferral)
+
     def _upsert_item(
         self,
         *,
@@ -682,6 +744,11 @@ class PreliminaryDismissalService:
 
         latest.source_name = source.name
         latest.fio = parsed.fio
+        self._move_deferral(
+            worker_key=latest.worker_key or worker_key,
+            previous_date=latest.dismissal_date,
+            current_date=parsed.dismissal_date,
+        )
         latest.dismissal_date = parsed.dismissal_date
         latest.position = parsed.position
         latest.departments_json = json.dumps(
@@ -799,12 +866,18 @@ class PreliminaryDismissalService:
 
             state = self._current_hr_state(item.worker_key, item.source_id)
             if state is not None and state.dismissal_date is not None:
+                self._move_deferral(
+                    worker_key=item.worker_key,
+                    previous_date=item.dismissal_date,
+                    current_date=state.dismissal_date,
+                )
                 item.dismissal_date = state.dismissal_date
                 item.status = "confirmed"
                 item.confirmed_at = item.confirmed_at or now
                 item.expired_at = None
             elif item.status != "confirmed":
                 if item.dismissal_date < self.today:
+                    self._discard_unconfirmed_deferral(item)
                     item.status = "expired"
                     item.expired_at = item.expired_at or now
                 else:

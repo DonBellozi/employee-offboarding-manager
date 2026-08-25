@@ -7,7 +7,10 @@
 <div class="upcoming-details-heading">
   <div>
     <strong>{{ details.fio }}</strong>
-    <span>Увольнение {{ details.dismissal_date.strftime('%d.%m.%Y') }}</span>
+    <span>
+      {{ 'Предварительное увольнение' if details.preliminary else 'Увольнение' }}
+      {{ details.dismissal_date.strftime('%d.%m.%Y') }}
+    </span>
   </div>
   <div class="upcoming-details-heading-actions">
     <div class="upcoming-details-organizations">

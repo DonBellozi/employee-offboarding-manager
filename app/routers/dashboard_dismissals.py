@@ -1604,10 +1604,17 @@ def defer_upcoming_dismissal(
             expected_dismissal_date=dismissal_date,
             operator_username=user.username,
         )
-        message = (
-            f"Блокировка для {result['fio']} отложена до "
-            f"{result['deferred_until'].strftime('%d.%m.%Y')}"
-        )
+        if result.get("preliminary"):
+            message = (
+                f"Если увольнение {result['fio']} подтвердится, блокировка "
+                f"будет отложена до "
+                f"{result['deferred_until'].strftime('%d.%m.%Y')}"
+            )
+        else:
+            message = (
+                f"Блокировка для {result['fio']} отложена до "
+                f"{result['deferred_until'].strftime('%d.%m.%Y')}"
+            )
         if "application/json" in request.headers.get("accept", ""):
             return JSONResponse(
                 {"ok": True, "message": message},

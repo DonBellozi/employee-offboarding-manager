@@ -343,6 +343,21 @@ class DismissalDetailsService:
         )
 
     def _automatic_blocking(self, candidate: dict) -> dict[str, str]:
+        if candidate.get("preliminary"):
+            planned = (
+                candidate["effective_block_date"].strftime("%d.%m.%Y")
+                + " 19:10"
+            )
+            return self._row(
+                "Автоблокировка при увольнении",
+                "Ожидает кадрового подтверждения",
+                state="pending",
+                note=(
+                    f"После подтверждения — не ранее {planned}. "
+                    "До появления увольнения в кадровой выгрузке "
+                    "учетные записи не блокируются."
+                ),
+            )
         if not candidate.get("blocking_required", True):
             return self._row(
                 "Автоблокировка при увольнении",

@@ -351,6 +351,13 @@ class UpcomingDismissalService:
                     "preliminary": False,
                     "final_dismissal": final_dismissal,
                     "blocking_required": final_dismissal,
+                    "deferral_allowed": bool(
+                        final_dismissal
+                        and not (
+                            block_run is not None
+                            and block_run.status == "success"
+                        )
+                    ),
                     "deferred": bool(
                         final_dismissal
                         and deferred_until is not None
@@ -436,6 +443,10 @@ class UpcomingDismissalService:
                 departments = []
             if not isinstance(departments, list):
                 departments = []
+            deferral = deferral_by_pair.get(
+                (item.worker_key, item.dismissal_date)
+            )
+            deferred_until = deferral.deferred_until if deferral else None
             department_text = " / ".join(
                 " ".join(str(value or "").split())
                 for value in departments
@@ -474,13 +485,28 @@ class UpcomingDismissalService:
                     "preliminary": True,
                     "final_dismissal": False,
                     "blocking_required": False,
-                    "deferred": False,
-                    "deferred_until": None,
-                    "effective_block_date": item.dismissal_date,
+                    "deferral_allowed": True,
+                    "deferred": bool(
+                        deferred_until is not None
+                        and deferred_until > item.dismissal_date
+                    ),
+                    "deferred_until": deferred_until,
+                    "effective_block_date": max(
+                        item.dismissal_date,
+                        deferred_until or item.dismissal_date,
+                    ),
                     "blocking_completed": False,
                     "blocking_completed_at": None,
-                    "deferral_count": 0,
-                    "deferral_operator": "",
+                    "deferral_count": (
+                        int(deferral.deferral_count or 0)
+                        if deferral is not None
+                        else 0
+                    ),
+                    "deferral_operator": (
+                        deferral.operator_username
+                        if deferral is not None
+                        else ""
+                    ),
                 }
             )
 
@@ -515,7 +541,7 @@ class UpcomingDismissalService:
         )
         if candidate is None:
             raise ValueError(
-                "Работник больше не является кандидатом на окончательное увольнение"
+                "Работник больше не находится в ближайших увольнениях"
             )
         if candidate["dismissal_date"] != expected_dismissal_date:
             raise ValueError(
@@ -555,13 +581,13 @@ class UpcomingDismissalService:
         )
         if candidate is None:
             raise ValueError(
-                "Работник больше не является кандидатом на окончательное увольнение"
+                "Работник больше не находится в ближайших увольнениях"
             )
         if candidate["dismissal_date"] != expected_dismissal_date:
             raise ValueError(
                 "Дата увольнения изменилась. Обновите журнал и проверьте запись снова"
             )
-        if not candidate.get("blocking_required"):
+        if not candidate.get("deferral_allowed"):
             raise ValueError(
                 "Отсрочка не требуется: работа в другой организации продолжается"
             )
@@ -574,10 +600,11 @@ class UpcomingDismissalService:
         )
         previous_until = deferral.deferred_until if deferral else None
         base_date = max(
-            self.today,
             expected_dismissal_date,
             previous_until or expected_dismissal_date,
         )
+        if not candidate.get("preliminary"):
+            base_date = max(self.today, base_date)
         deferred_until = base_date + timedelta(days=DEFERRAL_DAYS)
 
         if deferral is None:
@@ -607,6 +634,7 @@ class UpcomingDismissalService:
             ),
             "deferred_until": deferred_until.isoformat(),
             "days": DEFERRAL_DAYS,
+            "preliminary": bool(candidate.get("preliminary")),
             "organizations": [
                 {
                     "source_id": item["source_id"],
