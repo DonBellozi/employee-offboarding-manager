@@ -80,11 +80,12 @@
         </label>
 
         <label class="lifecycle-permission">
-          <input type="checkbox" name="allow_employment_close" value="on"{% if lifecycle.allow_employment_close %} checked{% endif %}>
+          <input type="checkbox" checked disabled>
           <span>
-            <strong>Разрешить кадровое закрытие отдельных ящиков</strong>
+            <strong>Кадровое закрытие отдельных ящиков — автоматически</strong>
             <small class="muted">
-              Только когда у конкретного физического zimbraId не осталось адресов действующих организаций.
+              Выполняется после повторной HR-проверки, только когда у конкретного
+              физического zimbraId не осталось адресов действующих организаций.
             </small>
           </span>
         </label>

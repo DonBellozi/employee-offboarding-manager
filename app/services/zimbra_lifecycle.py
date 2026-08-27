@@ -104,7 +104,6 @@ class ZimbraLifecycleService:
             "global_dry_run": bool(self.settings.dry_run),
             "any_action_enabled": bool(
                 row.allow_close
-                or row.allow_employment_close
                 or row.allow_alias_remove
                 or row.allow_backup
                 or row.allow_delete

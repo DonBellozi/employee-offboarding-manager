@@ -306,6 +306,12 @@ class ZimbraEmploymentLifecycleService:
             source_id = normalize(record.source_id)
             if source_id in state_sources:
                 records_by_source.setdefault(source_id, []).append(record)
+                address = normalize(record.corporate_email)
+                if address:
+                    result[address] = source_id
+                    login = address_login(address)
+                    if login:
+                        logins_by_source.setdefault(source_id, set()).add(login)
 
         for mapping in mappings:
             mapping_addresses = {
@@ -385,23 +391,28 @@ class ZimbraEmploymentLifecycleService:
         return result
 
     def _current_specs(self) -> list[ZimbraEmploymentSpec]:
+        states = list(self.db.scalars(select(HREmploymentState)).all())
+        if not states:
+            return []
+
+        deferrals = self._deferrals()
+        worker_keys = sorted(
+            {
+                row.worker_key
+                for row in states
+                if self._due(row, deferrals)
+            }
+        )
+        if not worker_keys:
+            return []
+        worker_key_set = set(worker_keys)
+        states = [
+            row for row in states if row.worker_key in worker_key_set
+        ]
         mappings = list(
             self.db.scalars(
                 select(EmailLoginMapping).where(
-                    EmailLoginMapping.zimbra_id != ""
-                )
-            ).all()
-        )
-        if not mappings:
-            return []
-
-        zimbra_ids = sorted({normalize(row.zimbra_id) for row in mappings if row.zimbra_id})
-        identities = ZimbraService(self.settings).accounts_by_ids(zimbra_ids)
-        worker_keys = sorted({row.worker_key for row in mappings})
-        states = list(
-            self.db.scalars(
-                select(HREmploymentState).where(
-                    HREmploymentState.worker_key.in_(worker_keys)
+                    EmailLoginMapping.worker_key.in_(worker_keys)
                 )
             ).all()
         )
@@ -412,47 +423,171 @@ class ZimbraEmploymentLifecycleService:
                 )
             ).all()
         )
+
+        mappings_by_worker: dict[str, list[EmailLoginMapping]] = {}
+        for mapping in mappings:
+            mappings_by_worker.setdefault(mapping.worker_key, []).append(mapping)
+
+        records_by_worker: dict[str, list[HRSourceRecord]] = {}
+        for record in records:
+            records_by_worker.setdefault(record.worker_key, []).append(record)
+
+        # Явное сопоставление хранится только для исключений. Для обычных
+        # одноименных AD/Zimbra учеток оно может быть удалено как избыточное,
+        # поэтому кадровый lifecycle обязан уметь найти физический ящик также
+        # по адресу из 1С. Дополнительные домены позволяют пережить смену
+        # primary .com -> .ru (или обратную) без зависимости от старого e-mail.
+        candidate_addresses_by_worker: dict[str, set[str]] = {}
+        configured_domains = {
+            normalize(value)
+            for value in getattr(self.settings, "zimbra_domains", ())
+            if normalize(value)
+        }
+        for worker_key in worker_keys:
+            addresses = candidate_addresses_by_worker.setdefault(
+                worker_key, set()
+            )
+            for record in records_by_worker.get(worker_key, []):
+                address = normalize(record.corporate_email)
+                if address:
+                    addresses.add(address)
+            for mapping in mappings_by_worker.get(worker_key, []):
+                addresses.update(
+                    value
+                    for value in (
+                        normalize(mapping.source_email),
+                        normalize(mapping.zimbra_email),
+                    )
+                    if value
+                )
+
+        # Один и тот же local-part может принадлежать разным людям в разных
+        # организациях. Междоменный поиск безопасен только для логина, который
+        # в кадровых данных относится ровно к одному worker_key.
+        workers_by_login: dict[str, set[str]] = {}
+        owner_rows = self.db.execute(
+            select(
+                HRSourceRecord.worker_key,
+                HRSourceRecord.corporate_email,
+            )
+        ).all()
+        for worker_key, address in owner_rows:
+            login = address_login(address)
+            if login:
+                workers_by_login.setdefault(login, set()).add(worker_key)
+        mapping_owner_rows = self.db.execute(
+            select(
+                EmailLoginMapping.worker_key,
+                EmailLoginMapping.source_email,
+                EmailLoginMapping.zimbra_email,
+            )
+        ).all()
+        for worker_key, source_email, zimbra_email in mapping_owner_rows:
+            for address in (source_email, zimbra_email):
+                login = address_login(address)
+                if login:
+                    workers_by_login.setdefault(login, set()).add(worker_key)
+        for worker_key, addresses in candidate_addresses_by_worker.items():
+            logins = {address_login(value) for value in tuple(addresses)}
+            for login in logins:
+                if (
+                    not login
+                    or len(workers_by_login.get(login, set())) != 1
+                ):
+                    continue
+                addresses.update(
+                    f"{login}@{domain}" for domain in configured_domains
+                )
+
+        service = ZimbraService(self.settings)
+        zimbra_ids = sorted(
+            {
+                normalize(row.zimbra_id)
+                for row in mappings
+                if normalize(row.zimbra_id)
+            }
+        )
+        identities_by_id = (
+            service.accounts_by_ids(zimbra_ids) if zimbra_ids else {}
+        )
+        identities_by_id = {
+            normalize(key): value for key, value in identities_by_id.items()
+        }
+        candidate_addresses = sorted(
+            {
+                address
+                for addresses in candidate_addresses_by_worker.values()
+                for address in addresses
+            }
+        )
+        identities_by_address = (
+            service.accounts_by_addresses(candidate_addresses)
+            if candidate_addresses
+            else {}
+        )
+
         states_by_worker: dict[str, dict[str, HREmploymentState]] = {}
         for state in states:
             states_by_worker.setdefault(state.worker_key, {})[
                 normalize(state.source_id)
             ] = state
         fio_by_worker: dict[str, str] = {}
-        records_by_worker: dict[str, list[HRSourceRecord]] = {}
-        for record in records:
-            records_by_worker.setdefault(record.worker_key, []).append(record)
         for row in [*states, *records]:
             if row.worker_key not in fio_by_worker and str(row.fio or "").strip():
                 fio_by_worker[row.worker_key] = str(row.fio).strip()
 
-        groups: dict[tuple[str, str], list[EmailLoginMapping]] = {}
-        for mapping in mappings:
-            groups.setdefault(
-                (mapping.worker_key, normalize(mapping.zimbra_id)), []
-            ).append(mapping)
-
-        deferrals = self._deferrals()
         result: list[ZimbraEmploymentSpec] = []
-        for (worker_key, zimbra_id), group_mappings in groups.items():
-            identity = identities.get(zimbra_id)
-            if identity is None:
-                continue
+        for worker_key in worker_keys:
+            worker_mappings = mappings_by_worker.get(worker_key, [])
+            identities: dict[str, ZimbraAccountIdentity] = {}
+            for mapping in worker_mappings:
+                zimbra_id = normalize(mapping.zimbra_id)
+                identity = identities_by_id.get(zimbra_id)
+                if identity is not None:
+                    identities[normalize(identity.zimbra_id)] = identity
+            for address in candidate_addresses_by_worker.get(worker_key, set()):
+                identity = identities_by_address.get(address)
+                if identity is not None:
+                    identities[normalize(identity.zimbra_id)] = identity
+
             worker_states = states_by_worker.get(worker_key, {})
-            result.extend(
-                self._specs_for_mailbox(
-                    worker_key=worker_key,
-                    fio=fio_by_worker.get(worker_key, ""),
-                    identity=identity,
-                    states=worker_states,
-                    deferrals=deferrals,
-                    address_sources=self._address_sources_for_mailbox(
+            worker_records = records_by_worker.get(worker_key, [])
+            for identity in identities.values():
+                identity_addresses = {
+                    normalize(identity.primary_email),
+                    *(normalize(value) for value in identity.addresses),
+                }
+                identity_addresses.discard("")
+                relevant_mappings = [
+                    mapping
+                    for mapping in worker_mappings
+                    if (
+                        normalize(mapping.zimbra_id)
+                        == normalize(identity.zimbra_id)
+                        or bool(
+                            identity_addresses
+                            & {
+                                normalize(mapping.source_email),
+                                normalize(mapping.zimbra_email),
+                            }
+                        )
+                    )
+                ]
+                result.extend(
+                    self._specs_for_mailbox(
+                        worker_key=worker_key,
+                        fio=fio_by_worker.get(worker_key, ""),
                         identity=identity,
-                        mappings=group_mappings,
                         states=worker_states,
-                        records=records_by_worker.get(worker_key, []),
-                    ),
+                        deferrals=deferrals,
+                        address_sources=self._address_sources_for_mailbox(
+                            identity=identity,
+                            mappings=relevant_mappings,
+                            states=worker_states,
+                            records=worker_records,
+                        ),
+                    )
                 )
-            )
         return result
 
     def _ensure_action(self, spec: ZimbraEmploymentSpec) -> ZimbraEmploymentAction:
@@ -513,13 +648,10 @@ class ZimbraEmploymentLifecycleService:
             row.last_error = "Повторная HR-проверка отменила действие"
             return False
 
-        config = self._settings()
         if row.action in {"transition", "manual_review"}:
             row.status = "intervention"
             return False
-        if row.action == "close" and not config.allow_employment_close:
-            row.status = "awaiting_permission"
-            return False
+        config = self._settings()
         if row.action == "remove_alias" and not config.allow_alias_remove:
             row.status = "awaiting_permission"
             return False
