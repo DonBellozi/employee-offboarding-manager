@@ -48,64 +48,6 @@
 </div>
 {% endif %}
 
-{% if queue %}
-<section class="card te-registration-history">
-  <div class="te-registration-heading">
-    <div>
-      <h2>Очередь на отправку — {{ queue|length }}</h2>
-      <p class="muted">
-        Все готовые запросы уйдут одним письмом в настроенное время отправки.
-        {% if is_admin %}При необходимости отдельный запрос можно отправить немедленно.{% endif %}
-      </p>
-    </div>
-  </div>
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr><th>Работник</th><th>Запрос</th><th>Плановая отправка</th><th>Состояние</th><th></th></tr>
-      </thead>
-      <tbody>
-      {% for item in queue %}
-        <tr>
-          <td>
-            <strong>{{ item.fio }}</strong>
-            <div class="muted">{{ item.department }} · {{ item.ad_login }}</div>
-          </td>
-          <td>{{ 'Восстановление' if item.request_kind == 'recovery' else 'Регистрация' }}</td>
-          <td>
-            {{ item.scheduled_for|app_datetime('%d.%m.%Y %H:%M') if item.scheduled_for else '–' }}
-            {% if item.next_attempt_at %}
-            <div class="muted">Повтор: {{ item.next_attempt_at|app_datetime('%d.%m.%Y %H:%M') }}</div>
-            {% endif %}
-          </td>
-          <td>
-            {{ status_labels.get(item.status, item.status) }}
-            {% if item.last_error %}<div class="registry-error">{{ item.last_error }}</div>{% endif %}
-          </td>
-          <td>
-            <div class="table-actions">
-              <form method="get" action="/techexpert/registration">
-                <input type="hidden" name="registration_id" value="{{ item.id }}">
-                <button class="button small secondary" type="submit">Открыть</button>
-              </form>
-              {% if is_admin and item.status == 'queued' %}
-              <form method="post"
-                    action="/techexpert/registration/{{ item.id }}/send-now"
-                    onsubmit="return confirm('Отправить этот запрос Техэксперту немедленно?');">
-                <input type="hidden" name="csrf" value="{{ csrf }}">
-                <button class="button small" type="submit">Отправить</button>
-              </form>
-              {% endif %}
-            </div>
-          </td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
-{% endif %}
-
 {% if registration %}
 {% set is_recovery = registration.request_kind == 'recovery' %}
 <section class="card te-registration-preview">
@@ -199,7 +141,7 @@
   <div class="alert success">
     Запрос находится в очереди и будет включён в ближайшее общее письмо
     {{ registration.scheduled_for|app_datetime('%d.%m.%Y %H:%M') if registration.scheduled_for else '' }}.
-    {% if is_admin %}Срочная отправка доступна в таблице очереди выше.{% endif %}
+    {% if is_admin %}Срочная отправка доступна в таблице очереди ниже.{% endif %}
   </div>
   {% elif registration.status == 'stale' %}
   <form method="get" action="/techexpert/registration">
@@ -278,6 +220,21 @@
     {{ selected.state.dismissal_date.strftime('%d.%m.%Y') if selected.state.dismissal_date else 'дата не указана' }}.
   </div>
   {% endif %}
+
+  {% if selected.open_request %}
+  <div class="alert success">
+    <strong>Запрос уже создан — повторное добавление не требуется.</strong><br>
+    {{ 'Восстановление' if selected.open_request.request_kind == 'recovery' else 'Регистрация' }}:
+    {{ status_labels.get(selected.open_request.status, selected.open_request.status) }}.
+    {% if selected.open_request.status == 'queued' and selected.open_request.scheduled_for %}
+    Плановая отправка — {{ selected.open_request.scheduled_for|app_datetime('%d.%m.%Y %H:%M') }}.
+    {% endif %}
+  </div>
+  <form method="get" action="/techexpert/registration">
+    <input type="hidden" name="registration_id" value="{{ selected.open_request.id }}">
+    <button class="button" type="submit">Открыть существующий запрос</button>
+  </form>
+  {% else %}
   {% if selected.last_sent %}
   <div class="alert warning">
     Запрос этому работнику уже отправлялся
@@ -336,8 +293,67 @@
       {% endif %}
     </button>
   </form>
+  {% endif %}
 </section>
 {% endif %}
+{% endif %}
+
+{% if queue %}
+<section class="card te-registration-history">
+  <div class="te-registration-heading">
+    <div>
+      <h2>Очередь на отправку — {{ queue|length }}</h2>
+      <p class="muted">
+        Все готовые запросы уйдут одним письмом в настроенное время отправки.
+        {% if is_admin %}При необходимости отдельный запрос можно отправить немедленно.{% endif %}
+      </p>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Работник</th><th>Запрос</th><th>Плановая отправка</th><th>Состояние</th><th></th></tr>
+      </thead>
+      <tbody>
+      {% for item in queue %}
+        <tr>
+          <td>
+            <strong>{{ item.fio }}</strong>
+            <div class="muted">{{ item.department }} · {{ item.ad_login }}</div>
+          </td>
+          <td>{{ 'Восстановление' if item.request_kind == 'recovery' else 'Регистрация' }}</td>
+          <td>
+            {{ item.scheduled_for|app_datetime('%d.%m.%Y %H:%M') if item.scheduled_for else '–' }}
+            {% if item.next_attempt_at %}
+            <div class="muted">Повтор: {{ item.next_attempt_at|app_datetime('%d.%m.%Y %H:%M') }}</div>
+            {% endif %}
+          </td>
+          <td>
+            {{ status_labels.get(item.status, item.status) }}
+            {% if item.last_error %}<div class="registry-error">{{ item.last_error }}</div>{% endif %}
+          </td>
+          <td>
+            <div class="table-actions">
+              <form method="get" action="/techexpert/registration">
+                <input type="hidden" name="registration_id" value="{{ item.id }}">
+                <button class="button small secondary" type="submit">Открыть</button>
+              </form>
+              {% if is_admin and item.status == 'queued' %}
+              <form method="post"
+                    action="/techexpert/registration/{{ item.id }}/send-now"
+                    onsubmit="return confirm('Отправить этот запрос Техэксперту немедленно?');">
+                <input type="hidden" name="csrf" value="{{ csrf }}">
+                <button class="button small" type="submit">Отправить</button>
+              </form>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
 {% endif %}
 
 {% if history %}

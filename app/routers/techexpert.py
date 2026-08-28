@@ -517,14 +517,23 @@ def techexpert_registration_prepare(
             actor=current.username,
             actor_source=current.source,
         )
-        letter_name = (
-            "Запрос на восстановление доступа"
-            if registration.request_kind == "recovery"
-            else "Письмо о регистрации"
-        )
+        if registration.status in {"queued", "processing"}:
+            message = (
+                "У работника уже есть запрос в очереди. "
+                "Открыт существующий запрос."
+            )
+        else:
+            letter_name = (
+                "Запрос на восстановление доступа"
+                if registration.request_kind == "recovery"
+                else "Письмо о регистрации"
+            )
+            message = (
+                f"{letter_name} подготовлен. Проверьте его перед отправкой."
+            )
         return _registration_redirect(
             registration_id=registration.id,
-            message=f"{letter_name} подготовлен. Проверьте его перед отправкой.",
+            message=message,
         )
     except Exception as exc:
         db.rollback()

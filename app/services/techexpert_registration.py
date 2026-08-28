@@ -35,6 +35,22 @@ from app.services.techexpert_settings import (
 
 
 ACTIVE_EMPLOYMENT_STATUSES = {"active", "scheduled"}
+OPEN_REQUEST_STATUSES = {
+    "draft",
+    "queued",
+    "processing",
+    "partial",
+    "failed",
+    "dry_run",
+}
+OPEN_REQUEST_PRIORITY = {
+    "processing": 0,
+    "queued": 1,
+    "partial": 2,
+    "failed": 3,
+    "draft": 4,
+    "dry_run": 5,
+}
 DEPARTMENT_SEPARATOR = " / "
 QUEUE_RETRY_MINUTES = 15
 
@@ -379,8 +395,46 @@ class TechExpertRegistrationService:
         record.techexpert_access = bool(is_member)
         self.db.commit()
 
+    def _open_request(
+        self,
+        worker_key: str,
+    ) -> TechExpertRegistrationRequest | None:
+        rows = list(
+            self.db.scalars(
+                select(TechExpertRegistrationRequest).where(
+                    TechExpertRegistrationRequest.worker_key == worker_key,
+                    TechExpertRegistrationRequest.source_id == self.source_id,
+                    TechExpertRegistrationRequest.status.in_(
+                        OPEN_REQUEST_STATUSES
+                    ),
+                )
+            ).all()
+        )
+        if not rows:
+            return None
+        return min(
+            rows,
+            key=lambda item: (
+                OPEN_REQUEST_PRIORITY.get(item.status, 99),
+                -(item.id or 0),
+            ),
+        )
+
     def selected_record(self, record_id: int) -> dict[str, object]:
         record, state = self.active_record(record_id)
+        open_request = self._open_request(record.worker_key)
+        if open_request is not None:
+            return {
+                "record": record,
+                "state": state,
+                "placements": self.placements(record),
+                "last_sent": None,
+                "open_request": open_request,
+                "membership_state": "request_open",
+                "membership_error": "",
+                "ad_login": open_request.ad_login,
+            }
+
         membership_state = "unknown"
         membership_error = ""
         ad_login = ""
@@ -406,6 +460,7 @@ class TechExpertRegistrationService:
             "state": state,
             "placements": self.placements(record),
             "last_sent": last_sent,
+            "open_request": None,
             "membership_state": membership_state,
             "membership_error": membership_error,
             "ad_login": ad_login,
@@ -420,6 +475,10 @@ class TechExpertRegistrationService:
         actor_source: str = "",
     ) -> TechExpertRegistrationRequest:
         record, _state = self.active_record(record_id)
+        open_request = self._open_request(record.worker_key)
+        if open_request is not None:
+            return open_request
+
         corporate_email = validate_email(
             record.corporate_email,
             field_name="корпоративный e-mail работника",
