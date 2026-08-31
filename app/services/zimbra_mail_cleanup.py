@@ -470,7 +470,10 @@ class ZimbraMailCleanupService:
     @staticmethod
     def build_query(execution: RuleExecution) -> str:
         return (
-            "is:anywhere -in:trash -in:junk -in:spam "
+            # В Zimbra нежелательная почта хранится в системной папке Junk.
+            # Папки `spam` у ящика может не быть, и `-in:spam` тогда роняет
+            # весь поиск с mail.NO_SUCH_FOLDER.
+            "is:anywhere -in:trash -in:junk "
             f'{execution.condition_type}:"{execution.condition_value}" '
             f"before:-{execution.retention_days}days"
         )
