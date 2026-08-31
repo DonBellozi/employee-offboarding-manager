@@ -28,7 +28,6 @@ TECHEXPERT_REGISTRATION_TEMPLATE_VARIABLES = {
     "position",
     "corporate_email",
     "mobile_phone",
-    "login",
     "department",
     "organization",
 }
@@ -115,7 +114,7 @@ DEFAULT_TECHEXPERT_REGISTRATION_SUBJECT = (
     "Регистрация пользователя в системе «Техэксперт» — {{ full_name }}"
 )
 
-PREVIOUS_DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML = """\
+DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML = """\
 <p><strong>{{ department }}</strong></p>
 <table border="1" cellpadding="6" cellspacing="0">
   <thead>
@@ -137,7 +136,7 @@ PREVIOUS_DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML = """\
 </table>
 """
 
-DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML = """\
+PREVIOUS_DEFAULT_TECHEXPERT_REGISTRATION_BODY_HTML = """\
 <p><strong>{{ department }}</strong></p>
 <p>Просим использовать указанный логин при регистрации пользователя.</p>
 <table border="1" cellpadding="6" cellspacing="0">
@@ -166,7 +165,7 @@ DEFAULT_TECHEXPERT_RECOVERY_SUBJECT = (
     "Восстановление доступа к системе «Техэксперт» — {{ full_name }}"
 )
 
-DEFAULT_TECHEXPERT_RECOVERY_BODY_HTML = """\
+PREVIOUS_DEFAULT_TECHEXPERT_RECOVERY_BODY_HTML = """\
 <p><strong>{{ department }}</strong></p>
 <p>
   Пользователь уже состоит в группе доступа AD «Техэксперт».
@@ -191,6 +190,34 @@ DEFAULT_TECHEXPERT_RECOVERY_BODY_HTML = """\
       <td>{{ corporate_email }}</td>
       <td>{{ mobile_phone }}</td>
       <td>{{ login }}</td>
+    </tr>
+  </tbody>
+</table>
+"""
+
+DEFAULT_TECHEXPERT_RECOVERY_BODY_HTML = """\
+<p><strong>{{ department }}</strong></p>
+<p>
+  Пользователь уже состоит в группе доступа AD «Техэксперт».
+  Просим восстановить его существующую учетную запись в системе
+  «Техэксперт» и повторно направить пользователю логин и пароль на
+  корпоративный e-mail.
+</p>
+<table border="1" cellpadding="6" cellspacing="0">
+  <thead>
+    <tr>
+      <th>ФИО</th>
+      <th>Должность</th>
+      <th>E-mail</th>
+      <th>Телефон</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>{{ full_name }}</td>
+      <td>{{ position }}</td>
+      <td>{{ corporate_email }}</td>
+      <td>{{ mobile_phone }}</td>
     </tr>
   </tbody>
 </table>
@@ -284,6 +311,12 @@ def ensure_techexpert_settings(db: Session) -> TechExpertSettings:
             row.recovery_subject = DEFAULT_TECHEXPERT_RECOVERY_SUBJECT
             changed = True
         if not row.recovery_body_html.strip():
+            row.recovery_body_html = DEFAULT_TECHEXPERT_RECOVERY_BODY_HTML
+            changed = True
+        elif (
+            row.recovery_body_html.strip()
+            == PREVIOUS_DEFAULT_TECHEXPERT_RECOVERY_BODY_HTML.strip()
+        ):
             row.recovery_body_html = DEFAULT_TECHEXPERT_RECOVERY_BODY_HTML
             changed = True
         if changed:

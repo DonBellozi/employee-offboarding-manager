@@ -826,13 +826,26 @@ class TechExpertRegistrationService:
     ) -> tuple[str, str]:
         if len(requests) == 1:
             return requests[0].subject, requests[0].body_html
+        request_kind = (
+            "recovery"
+            if requests[0].request_kind == "recovery"
+            else "registration"
+        )
         local_date = datetime.now(
             ZoneInfo(self.settings.app_timezone)
         ).strftime("%d.%m.%Y")
-        subject = (
-            f"Заявки в систему «Техэксперт» — {local_date} "
-            f"({len(requests)})"
-        )
+        if request_kind == "recovery":
+            subject = (
+                "Восстановление доступа к системе «Техэксперт» — "
+                f"{local_date} ({len(requests)})"
+            )
+            intro = "запросы на восстановление доступа"
+        else:
+            subject = (
+                "Регистрация пользователей в системе «Техэксперт» — "
+                f"{local_date} ({len(requests)})"
+            )
+            intro = "запросы на регистрацию пользователей"
         sections = []
         for index, request in enumerate(requests, start=1):
             kind = (
@@ -852,7 +865,7 @@ class TechExpertRegistrationService:
             '<div style="font-family:Arial,sans-serif;color:#172033;'
             'line-height:1.5">'
             "<p>Здравствуйте!</p>"
-            f"<p>Направляем накопленные запросы в систему «Техэксперт»: "
+            f"<p>Направляем накопленные {intro}: "
             f"{len(requests)}.</p>"
             f"{''.join(sections)}"
             "</div>"
@@ -970,7 +983,6 @@ class TechExpertRegistrationService:
                 item.id or 0,
             )
         )
-        subject, body_html = self._batch_letter(ready)
         try:
             profile = get_domain_mail_profile(
                 self.db,
@@ -981,13 +993,6 @@ class TechExpertRegistrationService:
                 self.config.recipient_email,
                 field_name="получатель уведомлений",
             )
-            CredentialMailer(self.settings).send_html(
-                recipient=recipient,
-                subject=subject,
-                body_html=body_html,
-                sender_email=profile.sender_email,
-                sender_name=profile.sender_name,
-            )
         except Exception as exc:
             for request in ready:
                 self._mark_queue_retry(request, exc)
@@ -995,21 +1000,55 @@ class TechExpertRegistrationService:
             self.db.commit()
             return 0
 
-        sent_at = utcnow()
-        for request in ready:
-            request.recipient_email = recipient
-            request.sender_email = profile.sender_email
-            request.sender_name = profile.sender_name
-            request.email_status = "sent"
-            request.email_error = ""
-            request.status = "sent"
-            request.sent_at = sent_at
-            request.last_error = ""
-            request.next_attempt_at = None
-            request.updated_at = sent_at
-            self._audit_result(request, actor)
-        self.db.commit()
-        return len(ready)
+        grouped = {
+            "registration": [
+                request
+                for request in ready
+                if request.request_kind != "recovery"
+            ],
+            "recovery": [
+                request
+                for request in ready
+                if request.request_kind == "recovery"
+            ],
+        }
+        sent_count = 0
+        for request_kind in ("registration", "recovery"):
+            group = grouped[request_kind]
+            if not group:
+                continue
+            subject, body_html = self._batch_letter(group)
+            try:
+                CredentialMailer(self.settings).send_html(
+                    recipient=recipient,
+                    subject=subject,
+                    body_html=body_html,
+                    sender_email=profile.sender_email,
+                    sender_name=profile.sender_name,
+                )
+            except Exception as exc:
+                for request in group:
+                    self._mark_queue_retry(request, exc)
+                    self._audit_result(request, actor)
+                self.db.commit()
+                continue
+
+            sent_at = utcnow()
+            for request in group:
+                request.recipient_email = recipient
+                request.sender_email = profile.sender_email
+                request.sender_name = profile.sender_name
+                request.email_status = "sent"
+                request.email_error = ""
+                request.status = "sent"
+                request.sent_at = sent_at
+                request.last_error = ""
+                request.next_attempt_at = None
+                request.updated_at = sent_at
+                self._audit_result(request, actor)
+            sent_count += len(group)
+            self.db.commit()
+        return sent_count
 
     def send_now(
         self,
