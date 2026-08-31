@@ -1,0 +1,316 @@
+{% extends "base.html" %}
+{% block title %}Политики хранения почты{% endblock %}
+{% block content %}
+<div class="zimbra-cleanup-page">
+  <div class="heading-row">
+    <div>
+      <h1>Политики хранения почты</h1>
+      <p class="muted">
+        Редкая служебная очистка массовых писем через штатный поиск Zimbra.
+        Trash, Junk и Dumpster в обработку не входят.
+      </p>
+    </div>
+    <div class="lifecycle-heading-actions">
+      <a class="button secondary" href="/settings/zimbra-observer">Наблюдение Zimbra</a>
+      <a class="button secondary" href="/settings/zimbra-lifecycle">Жизненный цикл</a>
+      <a class="button secondary" href="/settings">Настройки</a>
+    </div>
+  </div>
+
+  {% if message %}<div class="alert success">{{ message }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+  {% if global_dry_run %}
+  <div class="alert warning">
+    Глобальный DRY_RUN включён: проверка доступна, удаление сообщений запрещено.
+  </div>
+  {% endif %}
+
+  <section class="card cleanup-safety-card">
+    <strong>Безопасный порядок работы</strong>
+    <ol>
+      <li>Новое или изменённое правило всегда сохраняется выключенным.</li>
+      <li>Сначала выполните проверку и изучите найденные ящики.</li>
+      <li>Ручная очистка доступна только по свежей проверке этого же правила.</li>
+      <li>Недельный цикл берёт только включённые правила с разрешённой автоочисткой.</li>
+    </ol>
+  </section>
+
+  <section class="card cleanup-schedule-card">
+    <div class="observer-card-heading">
+      <div>
+        <h2>Режим запуска</h2>
+        <p class="muted">По умолчанию очистка выполняется только вручную.</p>
+      </div>
+      <span class="integration-badge{% if cleanup.schedule_mode == 'weekly' %} active{% endif %}">
+        {{ 'Раз в неделю' if cleanup.schedule_mode == 'weekly' else 'Только вручную' }}
+      </span>
+    </div>
+    <form method="post" action="/settings/zimbra-mail-cleanup/schedule">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <div class="cleanup-schedule-grid">
+        <label>
+          <span>Режим</span>
+          <select name="schedule_mode">
+            <option value="manual"{% if cleanup.schedule_mode == 'manual' %} selected{% endif %}>Только вручную</option>
+            <option value="weekly"{% if cleanup.schedule_mode == 'weekly' %} selected{% endif %}>Раз в неделю</option>
+          </select>
+        </label>
+        <label>
+          <span>День недели</span>
+          <select name="schedule_weekday">
+            {% for value, label in weekday_labels.items() %}
+            <option value="{{ value }}"{% if cleanup.schedule_weekday == value %} selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>Время сервера</span>
+          <input type="time" name="schedule_time" value="{{ cleanup.schedule_time }}" required>
+        </label>
+        <div class="cleanup-worker-note">
+          <span>Параллельных ящиков</span>
+          <strong>{{ cleanup.workers }}</strong>
+          <small class="muted">Задаётся через ZIMBRA_MAIL_CLEANUP_WORKERS.</small>
+        </div>
+      </div>
+      <div class="observer-form-actions">
+        <button class="button" type="submit">Сохранить режим</button>
+        {% if cleanup.updated_at %}
+        <span class="muted">
+          Изменено {{ cleanup.updated_at|app_datetime('%d.%m.%Y %H:%M') }}
+          {% if cleanup.updated_by %} — {{ cleanup.updated_by }}{% endif %}
+        </span>
+        {% endif %}
+      </div>
+    </form>
+  </section>
+
+  <section class="card cleanup-rule-editor" id="rule-editor">
+    <div class="observer-card-heading">
+      <div>
+        <h2>{{ 'Изменить правило' if edit_rule else 'Новое правило' }}</h2>
+        <p class="muted">Условие — только точный служебный e-mail отправителя или получателя.</p>
+      </div>
+      {% if edit_rule %}<a class="button secondary" href="/settings/zimbra-mail-cleanup">Отмена</a>{% endif %}
+    </div>
+    <form method="post" action="/settings/zimbra-mail-cleanup/rules/save">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="rule_id" value="{{ edit_rule.id if edit_rule else 0 }}">
+      <div class="cleanup-rule-grid">
+        <label class="cleanup-rule-name">
+          <span>Название</span>
+          <input type="text" name="name" maxlength="256" value="{{ edit_rule.name if edit_rule else '' }}" placeholder="Поздравления" required>
+        </label>
+        <label>
+          <span>Условие</span>
+          <select name="condition_type">
+            <option value="from"{% if not edit_rule or edit_rule.condition_type == 'from' %} selected{% endif %}>От кого</option>
+            <option value="to"{% if edit_rule and edit_rule.condition_type == 'to' %} selected{% endif %}>Кому</option>
+          </select>
+        </label>
+        <label class="cleanup-rule-value">
+          <span>E-mail</span>
+          <input type="email" name="condition_value" value="{{ edit_rule.condition_value if edit_rule else '' }}" placeholder="congratulations@domain.ru" required>
+        </label>
+        <label>
+          <span>Хранить, дней</span>
+          <input type="number" name="retention_days" min="1" max="3650" value="{{ edit_rule.retention_days if edit_rule else 30 }}" required>
+        </label>
+        <label>
+          <span>Область применения</span>
+          <select name="scope_mode">
+            <option value="all"{% if not edit_rule or edit_rule.scope_mode == 'all' %} selected{% endif %}>Все пользовательские ящики</option>
+            <option value="except"{% if edit_rule and edit_rule.scope_mode == 'except' %} selected{% endif %}>Все, кроме указанных</option>
+            <option value="selected"{% if edit_rule and edit_rule.scope_mode == 'selected' %} selected{% endif %}>Только указанные</option>
+          </select>
+        </label>
+        <label class="cleanup-mailboxes">
+          <span>Выбранные ящики или исключения</span>
+          <textarea name="mailboxes" rows="4" placeholder="archive@domain.ru&#10;service@domain.ru">{{ edit_mailboxes }}</textarea>
+          <small class="muted">По одному адресу в строке. Для области «Все» поле игнорируется.</small>
+        </label>
+      </div>
+      <div class="observer-form-actions">
+        <button class="button" type="submit">{{ 'Сохранить изменения' if edit_rule else 'Создать выключенным' }}</button>
+        {% if edit_rule %}<span class="muted">После изменения потребуется новая проверка.</span>{% endif %}
+      </div>
+    </form>
+  </section>
+
+  <section class="card cleanup-rules-card">
+    <div class="observer-card-heading">
+      <div>
+        <h2>Правила</h2>
+        <p class="muted">Проверка ничего не удаляет и формирует основание для ручной очистки.</p>
+      </div>
+      <span class="integration-badge{% if rule_views %} active{% endif %}">{{ rule_views|length }}</span>
+    </div>
+    <div class="table-wrap">
+      <table class="journal-table cleanup-rules-table">
+        <thead>
+          <tr>
+            <th>Правило</th>
+            <th>Условие</th>
+            <th>Срок</th>
+            <th>Область</th>
+            <th>Статус</th>
+            <th>Последний запуск</th>
+            <th>Действия</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in rule_views %}
+          {% set rule = item.rule %}
+          <tr>
+            <td><strong>{{ rule.name }}</strong></td>
+            <td>
+              <span>{{ condition_labels.get(rule.condition_type, rule.condition_type) }}</span>
+              <div><code>{{ rule.condition_value }}</code></div>
+            </td>
+            <td>{{ rule.retention_days }} дн.</td>
+            <td>
+              {{ scope_labels.get(rule.scope_mode, rule.scope_mode) }}
+              {% if item.mailboxes %}<div class="muted">Адресов: {{ item.mailboxes|length }}</div>{% endif %}
+            </td>
+            <td>
+              <span class="status {{ 'success' if rule.enabled else 'partial' }}">
+                {{ 'Включено' if rule.enabled else 'Выключено' }}
+              </span>
+              {% if rule.automatic_cleanup %}<div class="muted">Недельная очистка</div>{% endif %}
+            </td>
+            <td>
+              {% if rule.last_run_at %}
+              {{ rule.last_run_at|app_datetime('%d.%m.%Y %H:%M') }}
+              <div class="muted">{{ status_labels.get(rule.last_run_status, rule.last_run_status) }}</div>
+              {% else %}–{% endif %}
+            </td>
+            <td>
+              <div class="cleanup-actions">
+                <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/check">
+                  <input type="hidden" name="csrf" value="{{ csrf }}">
+                  <button class="button small secondary" type="submit">Проверить</button>
+                </form>
+                <a class="button small secondary" href="/settings/zimbra-mail-cleanup?edit_id={{ rule.id }}#rule-editor">Изменить</a>
+                {% if rule.enabled %}
+                <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/state" class="cleanup-state-form">
+                  <input type="hidden" name="csrf" value="{{ csrf }}">
+                  <input type="hidden" name="enabled" value="on">
+                  <label><input type="checkbox" name="automatic_cleanup" value="on"{% if rule.automatic_cleanup %} checked{% endif %}> Недельная</label>
+                  <button class="button small secondary" type="submit">Сохранить</button>
+                </form>
+                <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/state">
+                  <input type="hidden" name="csrf" value="{{ csrf }}">
+                  <button class="button small secondary" type="submit">Выключить</button>
+                </form>
+                {% elif item.preview_fresh %}
+                <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/state" class="cleanup-state-form">
+                  <input type="hidden" name="csrf" value="{{ csrf }}">
+                  <input type="hidden" name="enabled" value="on">
+                  <label><input type="checkbox" name="automatic_cleanup" value="on"> Недельная</label>
+                  <button class="button small" type="submit">Включить</button>
+                </form>
+                {% else %}
+                <span class="muted">Сначала проверить</span>
+                {% endif %}
+                <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/delete" onsubmit="return confirm('Удалить это правило? Журнал запусков сохранится.');">
+                  <input type="hidden" name="csrf" value="{{ csrf }}">
+                  <button class="button small danger" type="submit">Удалить</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="7" class="muted">Правил пока нет.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  {% if selected_run %}
+  <section class="card cleanup-result-card" id="run-result">
+    <div class="observer-card-heading">
+      <div>
+        <h2>Результат запуска #{{ selected_run.id }}</h2>
+        <p class="muted">
+          {{ selected_run.rule_name }} · {{ mode_labels.get(selected_run.mode, selected_run.mode) }} ·
+          {{ selected_run.started_at|app_datetime('%d.%m.%Y %H:%M') }}
+        </p>
+      </div>
+      <span class="status {{ 'success' if selected_run.status == 'success' else 'partial' if selected_run.status == 'warning' else 'failed' if selected_run.status == 'failed' else 'running' }}">
+        {{ status_labels.get(selected_run.status, selected_run.status) }}
+      </span>
+    </div>
+    <div class="cleanup-summary-grid">
+      <div><span>Проверено ящиков</span><strong>{{ selected_run.checked_mailboxes }}</strong></div>
+      <div><span>Есть совпадения</span><strong>{{ selected_run.matched_mailboxes }}</strong></div>
+      <div><span>Найдено сообщений</span><strong>{{ selected_run.found_messages }}</strong></div>
+      <div class="good"><span>Удалено</span><strong>{{ selected_run.deleted_messages }}</strong></div>
+      <div class="warn"><span>Достигнут лимит</span><strong>{{ selected_run.truncated_mailboxes }}</strong></div>
+      <div class="bad"><span>Ошибок</span><strong>{{ selected_run.error_count }}</strong></div>
+      <div><span>Длительность</span><strong>{{ '%.1f'|format(selected_run.duration_ms / 1000) }} сек.</strong></div>
+    </div>
+    {% if selected_run.error_message %}<div class="alert warning">{{ selected_run.error_message }}</div>{% endif %}
+    {% if selected_run_can_cleanup %}
+    <form method="post"
+          action="/settings/zimbra-mail-cleanup/rules/{{ selected_run.rule_id }}/cleanup"
+          class="cleanup-execute-form"
+          onsubmit="return confirm('Удалить найденные сообщения штатной командой Zimbra? Они будут удалены из пользовательских папок; Dumpster принудительно не очищается.');">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="preview_run_id" value="{{ selected_run.id }}">
+      <button class="button danger" type="submit"{% if global_dry_run %} disabled{% endif %}>Выполнить очистку по результату</button>
+      <span class="muted">Перед удалением поиск будет выполнен повторно.</span>
+    </form>
+    {% endif %}
+    <div class="table-wrap">
+      <table class="journal-table">
+        <thead><tr><th>Почтовый ящик</th><th>Найдено</th><th>Удалено</th><th>Время</th><th>Результат</th></tr></thead>
+        <tbody>
+          {% for detail in selected_run_details %}
+          <tr>
+            <td>{{ detail.mailbox }}</td>
+            <td>{{ detail.found }}</td>
+            <td>{{ detail.deleted }}</td>
+            <td>{{ '%.1f'|format((detail.duration_ms or 0) / 1000) }} сек.</td>
+            <td>
+              {% if detail.error %}<span class="journal-error">{{ detail.error }}</span>
+              {% elif detail.truncated %}<span class="muted">Найдено не менее показанного количества</span>
+              {% else %}Готово{% endif %}
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="5" class="muted">Совпадений и ошибок нет.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+
+  <section class="card cleanup-history-card">
+    <div class="observer-card-heading"><div><h2>Журнал запусков</h2><p class="muted">Содержимое и темы писем не сохраняются.</p></div></div>
+    <div class="table-wrap">
+      <table class="journal-table">
+        <thead><tr><th>Дата</th><th>Правило</th><th>Режим</th><th>Ящиков</th><th>Найдено</th><th>Удалено</th><th>Ошибки</th><th>Статус</th><th></th></tr></thead>
+        <tbody>
+          {% for run in runs %}
+          <tr>
+            <td>{{ run.started_at|app_datetime('%d.%m.%Y %H:%M') }}</td>
+            <td>{{ run.rule_name }}</td>
+            <td>{{ mode_labels.get(run.mode, run.mode) }}</td>
+            <td>{{ run.checked_mailboxes }}</td>
+            <td>{{ run.found_messages }}</td>
+            <td>{{ run.deleted_messages }}</td>
+            <td>{{ run.error_count }}</td>
+            <td>{{ status_labels.get(run.status, run.status) }}</td>
+            <td><a class="button small secondary" href="/settings/zimbra-mail-cleanup?run_id={{ run.id }}#run-result">Открыть</a></td>
+          </tr>
+          {% else %}
+          <tr><td colspan="9" class="muted">Запусков пока нет.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endblock %}

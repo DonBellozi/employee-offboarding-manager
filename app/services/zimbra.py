@@ -152,6 +152,188 @@ class ZimbraService:
             return f"{utf8_env} /opt/zimbra/bin/zmprov"
         return f"sudo -n -u zimbra {utf8_env} /opt/zimbra/bin/zmprov"
 
+    def _zmmailbox_command(self) -> str:
+        utf8_env = "/usr/bin/env LC_ALL=ru_RU.utf8 LANG=ru_RU.utf8"
+        if self.settings.zimbra_ssh_user.strip().lower() == "zimbra":
+            return f"{utf8_env} /opt/zimbra/bin/zmmailbox"
+        return f"sudo -n -u zimbra {utf8_env} /opt/zimbra/bin/zmmailbox"
+
+    @staticmethod
+    def _read_remote_command(
+        stdout,
+        stderr,
+        *,
+        timeout: int,
+    ) -> tuple[int, str, str]:
+        """Вычитать stdout/stderr без риска заполнить SSH-буфер."""
+
+        channel = stdout.channel
+        deadline = time.monotonic() + max(1, int(timeout))
+        out_chunks: list[bytes] = []
+        err_chunks: list[bytes] = []
+        while True:
+            progressed = False
+            while channel.recv_ready():
+                out_chunks.append(channel.recv(65536))
+                progressed = True
+            while channel.recv_stderr_ready():
+                err_chunks.append(channel.recv_stderr(65536))
+                progressed = True
+            if (
+                channel.exit_status_ready()
+                and not channel.recv_ready()
+                and not channel.recv_stderr_ready()
+            ):
+                break
+            if time.monotonic() >= deadline:
+                channel.close()
+                raise RuntimeError("Превышено время ожидания команды Zimbra")
+            if not progressed:
+                time.sleep(0.05)
+
+        return (
+            channel.recv_exit_status(),
+            b"".join(out_chunks).decode("utf-8", errors="replace").strip(),
+            b"".join(err_chunks).decode("utf-8", errors="replace").strip(),
+        )
+
+    def execute_mailbox_command(
+        self,
+        client: paramiko.SSHClient,
+        mailbox: str,
+        args: list[str],
+        *,
+        timeout: int = 180,
+        mutating: bool = False,
+    ) -> str:
+        """Выполнить одну штатную команду zmmailbox в открытом SSH-сеансе."""
+
+        if self.settings.zimbra_backend == "disabled":
+            raise RuntimeError("Zimbra backend отключен")
+        if mutating and self.settings.dry_run:
+            return "DRY-RUN"
+        normalized_mailbox = str(mailbox or "").strip().lower()
+        if "@" not in normalized_mailbox:
+            raise ValueError("Некорректный почтовый ящик Zimbra")
+        command = (
+            f"{self._zmmailbox_command()} -z -m "
+            f"{shlex.quote(normalized_mailbox)} -t {max(1, int(timeout))} "
+            f"{shlex.join(args)}"
+        )
+        stdin, stdout, stderr = client.exec_command(
+            command,
+            timeout=max(1, int(timeout)) + 10,
+        )
+        stdin.channel.shutdown_write()
+        code, out, err = self._read_remote_command(
+            stdout,
+            stderr,
+            timeout=max(1, int(timeout)) + 10,
+        )
+        if code != 0:
+            raise RuntimeError(
+                "zmmailbox завершился с ошибкой: "
+                f"{err or out or f'код {code}'}"
+            )
+        return out
+
+    def list_user_mailboxes(self) -> list[str]:
+        """Получить пользовательские ящики только из настроенных доменов."""
+
+        if self.settings.zimbra_backend == "disabled":
+            raise RuntimeError("Zimbra backend отключен")
+        domains = {
+            str(value or "").strip().lower()
+            for value in self.settings.zimbra_domains
+            if str(value or "").strip()
+        }
+        if not domains:
+            raise RuntimeError(
+                "Не заданы ZIMBRA_DOMAINS: безопасный список ящиков построить нельзя"
+            )
+
+        client = self._client()
+        try:
+            command = f"{self._zmprov_command()} -l gaa -v"
+            stdin, stdout, stderr = client.exec_command(command, timeout=190)
+            stdin.channel.shutdown_write()
+            code, out, err = self._read_remote_command(
+                stdout,
+                stderr,
+                timeout=190,
+            )
+            if code != 0:
+                raise RuntimeError(
+                    "Не удалось получить список ящиков Zimbra: "
+                    f"{err or out or f'код {code}'}"
+                )
+        finally:
+            client.close()
+
+        system_local_parts = {
+            "admin",
+            "galsync",
+            "ham",
+            "mailer-daemon",
+            "postmaster",
+            "root",
+            "spam",
+            "virus-quarantine",
+            "wiki",
+        }
+        system_prefixes = (
+            "galsync.",
+            "ham.",
+            "spam.",
+            "virus-quarantine.",
+            "wiki.",
+        )
+        mailboxes: list[str] = []
+        current_name = ""
+        attrs: dict[str, list[str]] = {}
+
+        def flush() -> None:
+            nonlocal current_name, attrs
+            primary = next(
+                (
+                    value.strip().lower()
+                    for value in attrs.get("mail", [])
+                    if value.strip()
+                ),
+                current_name.strip().lower(),
+            )
+            system_flag = any(
+                value.strip().lower() == "true"
+                for key in ("zimbraisystemresource", "zimbraisystemaccount")
+                for value in attrs.get(key, [])
+            )
+            calendar_resource = any(
+                value.strip()
+                for value in attrs.get("zimbracalrestype", [])
+            )
+            if primary and "@" in primary and not system_flag and not calendar_resource:
+                local, domain = primary.rsplit("@", 1)
+                if (
+                    domain in domains
+                    and local not in system_local_parts
+                    and not local.startswith(system_prefixes)
+                    and primary not in mailboxes
+                ):
+                    mailboxes.append(primary)
+            current_name = ""
+            attrs = {}
+
+        for raw_line in out.splitlines():
+            line = raw_line.rstrip("\r\n")
+            if line.startswith("# name "):
+                flush()
+                current_name = line[7:].strip()
+            elif ":" in line:
+                name, value = line.split(":", 1)
+                attrs.setdefault(name.strip().lower(), []).append(value.strip())
+        flush()
+        return sorted(mailboxes)
+
     def _execute_zmprov(
         self,
         client: paramiko.SSHClient,

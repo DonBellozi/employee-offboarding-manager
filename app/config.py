@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     zimbra_primary_domain: str = ""
     zimbra_create_aliases: bool = True
     zimbra_cos_id: str = ""
+    zimbra_mail_cleanup_workers: int = Field(default=4, ge=1, le=8)
 
     smtp_host: str = ""
     smtp_port: int = 587
@@ -78,13 +79,6 @@ class Settings(BaseSettings):
     smtp_timeout_seconds: int = 20
     smtp_retry_attempts: int = 3
     smtp_retry_delay_seconds: float = 2.0
-
-    # Техэксперт: приложение только проверяет маркерную группу AD и отправляет
-    # письмо внешней организации. Состав группы и сам Техэксперт не изменяются.
-    techexpert_enabled: bool = False
-    techexpert_source_domain: str = ""
-    techexpert_ad_group_dn: str = ""
-    techexpert_recipient_email: str = ""
 
     # IT Invent / MS SQL Server. Интеграция намеренно read-only:
     # приложение выполняет только SELECT, а учетной записи SQL следует

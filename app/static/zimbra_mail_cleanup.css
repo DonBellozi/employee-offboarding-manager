@@ -1,0 +1,63 @@
+.zimbra-cleanup-page { display: grid; gap: 18px; }
+.zimbra-cleanup-page .card { margin: 0; }
+.cleanup-safety-card ol { margin: 10px 0 0; padding-left: 22px; color: #52627a; }
+.cleanup-schedule-grid,
+.cleanup-rule-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+.cleanup-schedule-grid label,
+.cleanup-rule-grid label { display: grid; gap: 6px; }
+.cleanup-rule-name,
+.cleanup-rule-value { grid-column: span 2; }
+.cleanup-mailboxes { grid-column: 1 / -1; }
+.cleanup-worker-note {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #dce4ef;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+.cleanup-worker-note strong { font-size: 1.35rem; }
+.cleanup-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 250px; }
+.cleanup-actions form { margin: 0; }
+.cleanup-state-form { display: inline-flex; align-items: center; gap: 7px; }
+.cleanup-state-form label { white-space: nowrap; font-size: .85rem; color: #52627a; }
+.cleanup-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+.cleanup-summary-grid > div {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid #dce4ef;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+.cleanup-summary-grid span { color: #64748b; font-size: .82rem; }
+.cleanup-summary-grid strong { font-size: 1.25rem; }
+.cleanup-summary-grid .good { background: #f0fdf4; }
+.cleanup-summary-grid .warn { background: #fffbeb; }
+.cleanup-summary-grid .bad { background: #fff1f2; }
+.cleanup-execute-form { display: flex; align-items: center; gap: 12px; margin: 14px 0; }
+.cleanup-rules-table code { overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  .cleanup-schedule-grid,
+  .cleanup-rule-grid,
+  .cleanup-summary-grid { grid-template-columns: 1fr 1fr; }
+  .cleanup-rule-name,
+  .cleanup-rule-value { grid-column: span 1; }
+}
+@media (max-width: 620px) {
+  .cleanup-schedule-grid,
+  .cleanup-rule-grid,
+  .cleanup-summary-grid { grid-template-columns: 1fr; }
+  .cleanup-mailboxes { grid-column: auto; }
+  .cleanup-execute-form { align-items: stretch; flex-direction: column; }
+}

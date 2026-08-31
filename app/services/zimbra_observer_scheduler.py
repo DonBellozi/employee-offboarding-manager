@@ -10,6 +10,7 @@ from sqlalchemy import desc, select
 from app.config import Settings
 from app.models_zimbra_observer import ZimbraObservationRun
 from app.services.zimbra_observer import as_utc
+from app.services.zimbra_mail_cleanup import ZimbraMailCleanupService
 from app.services.zimbra_protection import ManagedZimbraObserverService
 from app.services.zimbra_scheduled_lifecycle import ZimbraScheduledLifecycleExecutor
 
@@ -137,6 +138,21 @@ class ZimbraObserverScheduler:
                                         "Автоматическое исполнение жизненного цикла "
                                         "Zimbra завершилось ошибкой"
                                     )
+
+                    # Служебная очистка использует этот же scheduler, но имеет
+                    # собственное ручное/недельное расписание в БД. Она не
+                    # зависит от включения ежедневного наблюдателя.
+                    cleanup_runs = ZimbraMailCleanupService(
+                        self.settings,
+                        db,
+                    ).run_weekly_if_due()
+                    if cleanup_runs:
+                        logger.info(
+                            "Недельная очистка почты Zimbra: rules=%s deleted=%s errors=%s",
+                            len(cleanup_runs),
+                            sum(row.deleted_messages for row in cleanup_runs),
+                            sum(row.error_count for row in cleanup_runs),
+                        )
             except Exception:
                 logger.exception("Фоновая проверка Zimbra завершилась ошибкой")
 

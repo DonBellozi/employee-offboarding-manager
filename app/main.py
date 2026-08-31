@@ -26,6 +26,7 @@ from app.routers import (
     techexpert,
     telegram_settings,
     zimbra_lifecycle,
+    zimbra_mail_cleanup,
     zimbra_observer,
     zimbra_protection,
 )
@@ -137,6 +138,7 @@ app.include_router(telegram_settings.router)
 app.include_router(zimbra_observer.router)
 app.include_router(zimbra_protection.router)
 app.include_router(zimbra_lifecycle.router)
+app.include_router(zimbra_mail_cleanup.router)
 app.include_router(mail_templates.router)
 app.include_router(admin.router)
 
