@@ -62,19 +62,6 @@ def _integration_overview(settings: Settings) -> dict[str, dict[str, object]]:
         and settings.zimbra_backend != "disabled"
     )
     smtp_configured = bool(settings.smtp_host)
-    techexpert_configured = bool(
-        settings.techexpert_enabled
-        and settings.techexpert_source_domain.strip()
-        and settings.techexpert_ad_group_dn.strip()
-        and settings.techexpert_recipient_email.strip()
-        and settings.techexpert_source_domain.strip().lower()
-        in {
-            domain.strip().lower()
-            for domain in settings.zimbra_domains
-            if domain.strip()
-        }
-        and settings.smtp_host
-    )
     onec_configured = bool(
         settings.onec_imap_host
         and settings.onec_imap_username
@@ -140,24 +127,6 @@ def _integration_overview(settings: Settings) -> dict[str, dict[str, object]]:
             "password": _set_not_set(settings.smtp_password),
             "timeout": f"{settings.smtp_timeout_seconds} сек.",
             "retries": settings.smtp_retry_attempts,
-        },
-        "techexpert": {
-            "configured": techexpert_configured,
-            "badge": (
-                "Используется"
-                if techexpert_configured
-                else "Отключено"
-                if not settings.techexpert_enabled
-                else "Не настроено"
-            ),
-            "enabled": _yes_no(settings.techexpert_enabled),
-            "source_domain": (
-                settings.techexpert_source_domain.strip().lower() or "–"
-            ),
-            "group_dn": settings.techexpert_ad_group_dn or "–",
-            "recipient": settings.techexpert_recipient_email or "–",
-            "schedule": "08:45 после подтвержденного увольнения",
-            "mode": "Только проверка AD и письмо",
         },
         "itinvent": {
             "configured": itinvent_configured,
