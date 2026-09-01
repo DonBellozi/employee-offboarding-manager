@@ -5,6 +5,12 @@
   const title = panel.querySelector("[data-cleanup-progress-title]");
   const note = panel.querySelector("[data-cleanup-progress-note]");
   const runList = panel.querySelector("[data-cleanup-progress-runs]");
+  const schedulerStatus = document.querySelector("[data-cleanup-scheduler-status]");
+  const schedulerLastCheck = document.querySelector("[data-cleanup-scheduler-last-check]");
+  const schedulerNextRun = document.querySelector("[data-cleanup-scheduler-next-run]");
+  const schedulerRules = document.querySelector("[data-cleanup-scheduler-rules]");
+  const schedulerTimezone = document.querySelector("[data-cleanup-scheduler-timezone]");
+  const schedulerMessage = document.querySelector("[data-cleanup-scheduler-message]");
   const startForms = Array.from(document.querySelectorAll("form[data-cleanup-start]"));
   let isActive = panel.dataset.active === "true";
   let hadActiveRun = isActive;
@@ -62,6 +68,21 @@
     });
   };
 
+  const renderScheduler = (scheduler) => {
+    if (!scheduler || !schedulerStatus) return;
+    schedulerStatus.textContent = scheduler.status_label;
+    schedulerStatus.classList.toggle(
+      "active",
+      scheduler.status === "running" || scheduler.status === "completed"
+    );
+    schedulerLastCheck.textContent = scheduler.last_check || "—";
+    schedulerNextRun.textContent = scheduler.next_run || "—";
+    schedulerRules.textContent = scheduler.automatic_rule_count;
+    schedulerTimezone.textContent = scheduler.timezone;
+    schedulerMessage.textContent = scheduler.message
+      || "Планировщик ещё не сообщил состояние.";
+  };
+
   const renderStarting = () => {
     isActive = true;
     hadActiveRun = true;
@@ -91,6 +112,7 @@
       });
       if (!response.ok) return;
       const data = await response.json();
+      renderScheduler(data.scheduler);
       if (data.active) {
         isActive = true;
         hadActiveRun = true;

@@ -43,17 +43,61 @@ class ZimbraMailCleanupScheduler:
         now: datetime | None = None,
     ) -> int:
         with self.session_factory() as db:
-            runs = ZimbraMailCleanupService(
-                self.settings,
-                db,
-            ).run_weekly_if_due(now=now)
-            if runs:
-                logger.info(
-                    "Недельная очистка почты Zimbra: rules=%s deleted=%s errors=%s",
-                    len(runs),
-                    sum(row.deleted_messages for row in runs),
-                    sum(row.error_count for row in runs),
+            service = ZimbraMailCleanupService(self.settings, db)
+            decision = service.weekly_schedule_decision(now=now)
+            if not decision.due:
+                service.update_scheduler_state(
+                    status="waiting" if decision.enabled else "manual",
+                    message=decision.reason,
+                    next_run_at=decision.next_run_at,
+                    checked_at=decision.current,
                 )
+                return 0
+
+            service.update_scheduler_state(
+                status="running",
+                message=decision.reason,
+                next_run_at=decision.due_at,
+                checked_at=decision.current,
+            )
+            try:
+                runs = service.scheduled_cleanup(
+                    actor="system",
+                    now=decision.current,
+                )
+            except Exception as exc:
+                db.rollback()
+                service.update_scheduler_state(
+                    status="error",
+                    message=f"Автозапуск не выполнен: {str(exc)[:1800]}",
+                    next_run_at=decision.due_at,
+                )
+                raise
+
+            failed = sum(row.status == "failed" for row in runs)
+            skipped = all(row.status == "skipped" for row in runs)
+            next_decision = service.weekly_schedule_decision(
+                now=decision.current,
+            )
+            if skipped:
+                message = runs[0].error_message
+            else:
+                message = (
+                    f"Недельный запуск завершён: правил {len(runs)}, "
+                    f"удалено {sum(row.deleted_messages for row in runs)}, "
+                    f"ошибок {sum(row.error_count for row in runs)}"
+                )
+            service.update_scheduler_state(
+                status="error" if failed else "completed",
+                message=message,
+                next_run_at=next_decision.next_run_at,
+            )
+            logger.info(
+                "Недельная очистка почты Zimbra: rules=%s deleted=%s errors=%s",
+                len(runs),
+                sum(row.deleted_messages for row in runs),
+                sum(row.error_count for row in runs),
+            )
             return len(runs)
 
     def _run_loop(self) -> None:

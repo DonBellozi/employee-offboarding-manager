@@ -10,7 +10,7 @@ from datetime import datetime, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from email_validator import EmailNotValidError, validate_email
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -132,6 +132,18 @@ class MailboxResult:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class WeeklyScheduleDecision:
+    enabled: bool
+    due: bool
+    current: datetime
+    due_at: datetime | None
+    next_run_at: datetime | None
+    reason: str
+    latest_run_id: int = 0
+    latest_run_status: str = ""
+
+
 class ZimbraMailCleanupService:
     """Правила хранения сообщений поверх существующего SSH/Zimbra-клиента."""
 
@@ -144,19 +156,41 @@ class ZimbraMailCleanupService:
     def get_settings_record(self) -> ZimbraMailCleanupSettings:
         row = self.db.get(ZimbraMailCleanupSettings, 1)
         if row is None:
+            now = utcnow()
             row = ZimbraMailCleanupSettings(
                 id=1,
                 schedule_mode="manual",
                 schedule_weekday=6,
                 schedule_time="03:00",
+                schedule_changed_at=now,
             )
             self.db.add(row)
+            self.db.commit()
+            self.db.refresh(row)
+        elif row.schedule_changed_at is None:
+            row.schedule_changed_at = row.updated_at or row.created_at or utcnow()
             self.db.commit()
             self.db.refresh(row)
         return row
 
     def settings_view(self) -> dict[str, object]:
         row = self.get_settings_record()
+        last_check_at = as_utc(row.scheduler_last_check_at)
+        scheduler_stale = bool(
+            last_check_at is not None
+            and row.scheduler_status != "running"
+            and (utcnow() - last_check_at).total_seconds() > 90
+        )
+        automatic_rule_count = int(
+            self.db.scalar(
+                select(func.count(ZimbraMailRetentionRule.id)).where(
+                    ZimbraMailRetentionRule.deleted_at.is_(None),
+                    ZimbraMailRetentionRule.enabled.is_(True),
+                    ZimbraMailRetentionRule.automatic_cleanup.is_(True),
+                )
+            )
+            or 0
+        )
         return {
             "schedule_mode": row.schedule_mode,
             "schedule_weekday": row.schedule_weekday,
@@ -166,8 +200,15 @@ class ZimbraMailCleanupService:
                 str(row.schedule_weekday),
             ),
             "workers": int(self.settings.zimbra_mail_cleanup_workers),
+            "automatic_rule_count": automatic_rule_count,
+            "scheduler_last_check_at": row.scheduler_last_check_at,
+            "scheduler_status": row.scheduler_status,
+            "scheduler_stale": scheduler_stale,
+            "scheduler_message": row.scheduler_message,
+            "scheduler_next_run_at": row.scheduler_next_run_at,
+            "timezone": self.settings.app_timezone,
             "updated_by": row.updated_by,
-            "updated_at": row.updated_at,
+            "updated_at": row.schedule_changed_at or row.updated_at,
         }
 
     @staticmethod
@@ -200,7 +241,13 @@ class ZimbraMailCleanupService:
         row.schedule_weekday = weekday
         row.schedule_time = normalized_time
         row.updated_by = str(actor or "")[:256]
-        row.updated_at = utcnow()
+        changed_at = utcnow()
+        row.schedule_changed_at = changed_at
+        row.updated_at = changed_at
+        row.scheduler_last_check_at = None
+        row.scheduler_status = "pending"
+        row.scheduler_message = "Расписание сохранено, ожидается проверка планировщика"
+        row.scheduler_next_run_at = None
         self._audit(
             actor,
             "zimbra_mail_cleanup_settings_saved",
@@ -211,6 +258,23 @@ class ZimbraMailCleanupService:
                 "schedule_time": normalized_time,
             },
         )
+        self.db.commit()
+        self.db.refresh(row)
+        return row
+
+    def update_scheduler_state(
+        self,
+        *,
+        status: str,
+        message: str,
+        next_run_at: datetime | None,
+        checked_at: datetime | None = None,
+    ) -> ZimbraMailCleanupSettings:
+        row = self.get_settings_record()
+        row.scheduler_last_check_at = as_utc(checked_at) or utcnow()
+        row.scheduler_status = str(status or "")[:32]
+        row.scheduler_message = str(message or "")[:2000]
+        row.scheduler_next_run_at = as_utc(next_run_at)
         self.db.commit()
         self.db.refresh(row)
         return row
@@ -1198,22 +1262,57 @@ class ZimbraMailCleanupService:
             actor=actor,
         )
 
-    def weekly_due(self, *, now: datetime | None = None) -> bool:
+    def weekly_schedule_decision(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> WeeklyScheduleDecision:
         config = self.get_settings_record()
-        if config.schedule_mode != "weekly":
-            return False
         tz = ZoneInfo(self.settings.app_timezone)
-        current = now.astimezone(tz) if now is not None else datetime.now(tz)
-        if current.weekday() != int(config.schedule_weekday):
-            return False
+        current = (as_utc(now) or utcnow()).astimezone(tz)
+        if config.schedule_mode != "weekly":
+            return WeeklyScheduleDecision(
+                enabled=False,
+                due=False,
+                current=current,
+                due_at=None,
+                next_run_at=None,
+                reason="Выбран режим «Только вручную»",
+            )
         hour, minute = (int(part) for part in config.schedule_time.split(":", 1))
+        days_since_weekday = (
+            current.weekday() - int(config.schedule_weekday)
+        ) % 7
+        due_date = current.date() - timedelta(days=days_since_weekday)
         due = datetime.combine(
-            current.date(),
+            due_date,
             dt_time(hour=hour, minute=minute),
             tzinfo=tz,
         )
-        if current < due:
-            return False
+        if due > current:
+            due -= timedelta(days=7)
+        next_weekly_run = due + timedelta(days=7)
+        changed_at = (
+            as_utc(
+                config.schedule_changed_at
+                or config.updated_at
+                or config.created_at
+            )
+            or utcnow()
+        ).astimezone(tz)
+        current_label = WEEKDAY_LABELS[current.weekday()].lower()
+        if due < changed_at:
+            return WeeklyScheduleDecision(
+                enabled=True,
+                due=False,
+                current=current,
+                due_at=due,
+                next_run_at=next_weekly_run,
+                reason=(
+                    f"Сейчас {current_label}, {current:%d.%m.%Y %H:%M}. "
+                    "Ближайший срок по сохранённому расписанию ещё не наступил"
+                ),
+            )
         latest = self.db.scalars(
             select(ZimbraMailCleanupRun)
             .where(ZimbraMailCleanupRun.trigger == "scheduled")
@@ -1224,17 +1323,59 @@ class ZimbraMailCleanupService:
             .limit(1)
         ).first()
         started = as_utc(latest.started_at) if latest is not None else None
-        if started is None:
-            return True
-        last_local = started.astimezone(tz)
-        if last_local.isocalendar()[:2] != current.isocalendar()[:2]:
-            return True
-        if latest.status != "failed":
-            return False
-        finished = as_utc(latest.completed_at) or started
-        return (
-            current.astimezone(timezone.utc) - finished
-        ).total_seconds() >= SCHEDULE_FAILURE_RETRY_MINUTES * 60
+        if started is None or started.astimezone(tz) < due:
+            return WeeklyScheduleDecision(
+                enabled=True,
+                due=True,
+                current=current,
+                due_at=due,
+                next_run_at=due,
+                reason=(
+                    f"Наступил недельный срок: "
+                    f"{WEEKDAY_LABELS[int(config.schedule_weekday)]}, "
+                    f"{due:%d.%m.%Y %H:%M} ({self.settings.app_timezone})"
+                ),
+            )
+        if latest.status == "failed":
+            finished = as_utc(latest.completed_at) or started
+            retry_at = finished + timedelta(
+                minutes=SCHEDULE_FAILURE_RETRY_MINUTES
+            )
+            retry_local = retry_at.astimezone(tz)
+            retry_due = current.astimezone(timezone.utc) >= retry_at
+            return WeeklyScheduleDecision(
+                enabled=True,
+                due=retry_due,
+                current=current,
+                due_at=due,
+                next_run_at=current if retry_due else retry_local,
+                reason=(
+                    f"Запуск #{latest.id} завершился ошибкой; "
+                    + (
+                        "разрешён повторный запуск"
+                        if retry_due
+                        else f"повтор в {retry_local:%d.%m.%Y %H:%M}"
+                    )
+                ),
+                latest_run_id=int(latest.id),
+                latest_run_status=latest.status,
+            )
+        return WeeklyScheduleDecision(
+            enabled=True,
+            due=False,
+            current=current,
+            due_at=due,
+            next_run_at=next_weekly_run,
+            reason=(
+                f"Недельный срок уже обработан запуском #{latest.id} "
+                f"со статусом «{latest.status}»"
+            ),
+            latest_run_id=int(latest.id),
+            latest_run_status=latest.status,
+        )
+
+    def weekly_due(self, *, now: datetime | None = None) -> bool:
+        return self.weekly_schedule_decision(now=now).due
 
     def run_weekly_if_due(
         self,

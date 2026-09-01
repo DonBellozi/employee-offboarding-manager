@@ -116,6 +116,40 @@
         {% endif %}
       </div>
     </form>
+    <div class="cleanup-scheduler-diagnostics">
+      <div class="cleanup-scheduler-diagnostics-heading">
+        <strong>Состояние планировщика</strong>
+        <span class="integration-badge{% if cleanup.scheduler_status in ['running', 'completed'] and not cleanup.scheduler_stale %} active{% endif %}"
+              data-cleanup-scheduler-status>
+          {{ scheduler_status_labels.get('stale' if cleanup.scheduler_stale else cleanup.scheduler_status, 'Ещё не проверял расписание') }}
+        </span>
+      </div>
+      <div class="cleanup-scheduler-diagnostics-grid">
+        <div>
+          <span>Последняя проверка</span>
+          <strong data-cleanup-scheduler-last-check>
+            {% if cleanup.scheduler_last_check_at %}{{ cleanup.scheduler_last_check_at|app_datetime('%d.%m.%Y %H:%M') }}{% else %}—{% endif %}
+          </strong>
+        </div>
+        <div>
+          <span>Следующий срок</span>
+          <strong data-cleanup-scheduler-next-run>
+            {% if cleanup.scheduler_next_run_at %}{{ cleanup.scheduler_next_run_at|app_datetime('%d.%m.%Y %H:%M') }}{% else %}—{% endif %}
+          </strong>
+        </div>
+        <div>
+          <span>Автоправил</span>
+          <strong data-cleanup-scheduler-rules>{{ cleanup.automatic_rule_count }}</strong>
+        </div>
+        <div>
+          <span>Часовой пояс</span>
+          <strong data-cleanup-scheduler-timezone>{{ cleanup.timezone }}</strong>
+        </div>
+      </div>
+      <p class="muted cleanup-scheduler-message" data-cleanup-scheduler-message>
+        {{ cleanup.scheduler_message or 'После запуска приложения планировщик должен отметиться здесь в течение 30 секунд.' }}
+      </p>
+    </div>
   </section>
 
   <section class="card cleanup-rule-editor" id="rule-editor">

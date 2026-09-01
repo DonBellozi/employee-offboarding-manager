@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, Request
 from fastapi.responses import RedirectResponse
@@ -14,6 +15,7 @@ from app.security import get_or_create_csrf, require_admin, validate_csrf
 from app.services.zimbra_mail_cleanup import (
     WEEKDAY_LABELS,
     ZimbraMailCleanupService,
+    as_utc,
     format_duration_ms,
 )
 from app.time_utils import register_datetime_filters
@@ -45,6 +47,24 @@ SCOPE_LABELS = {
     "selected": "Только выбранные",
     "except": "Все, кроме выбранных",
 }
+SCHEDULER_STATUS_LABELS = {
+    "pending": "Ожидает проверки",
+    "manual": "Только вручную",
+    "waiting": "Ожидает срока",
+    "running": "Автоочистка выполняется",
+    "completed": "Последний запуск завершён",
+    "error": "Ошибка автозапуска",
+    "stale": "Планировщик не отвечает",
+}
+
+
+def _format_scheduler_datetime(value, timezone_name: str) -> str:
+    normalized = as_utc(value)
+    if normalized is None:
+        return ""
+    return normalized.astimezone(ZoneInfo(timezone_name)).strftime(
+        "%d.%m.%Y %H:%M"
+    )
 
 
 def _redirect(
@@ -167,6 +187,7 @@ def _context(
         "status_labels": STATUS_LABELS,
         "condition_labels": CONDITION_LABELS,
         "scope_labels": SCOPE_LABELS,
+        "scheduler_status_labels": SCHEDULER_STATUS_LABELS,
         "message": message,
         "error": error,
         "global_dry_run": settings.dry_run,
@@ -207,7 +228,9 @@ def cleanup_progress(
     db: Session = Depends(get_db),
 ):
     require_admin(request)
-    runs = ZimbraMailCleanupService(settings, db).active_runs()
+    service = ZimbraMailCleanupService(settings, db)
+    runs = service.active_runs()
+    cleanup = service.settings_view()
     return {
         "active": bool(runs),
         "runs": [
@@ -228,6 +251,32 @@ def cleanup_progress(
             }
             for run in runs
         ],
+        "scheduler": {
+            "status": (
+                "stale"
+                if cleanup["scheduler_stale"]
+                else cleanup["scheduler_status"]
+            ),
+            "status_label": SCHEDULER_STATUS_LABELS.get(
+                (
+                    "stale"
+                    if cleanup["scheduler_stale"]
+                    else cleanup["scheduler_status"]
+                ),
+                "Планировщик ещё не проверял расписание",
+            ),
+            "message": cleanup["scheduler_message"],
+            "last_check": _format_scheduler_datetime(
+                cleanup["scheduler_last_check_at"],
+                settings.app_timezone,
+            ),
+            "next_run": _format_scheduler_datetime(
+                cleanup["scheduler_next_run_at"],
+                settings.app_timezone,
+            ),
+            "automatic_rule_count": cleanup["automatic_rule_count"],
+            "timezone": settings.app_timezone,
+        },
     }
 
 

@@ -133,6 +133,26 @@ def ensure_compatibility_schema() -> None:
                 "progress_at": "DATETIME",
             },
         )
+        add_missing_columns(
+            connection,
+            "zimbra_mail_cleanup_settings",
+            {
+                "schedule_changed_at": "DATETIME",
+                "scheduler_last_check_at": "DATETIME",
+                "scheduler_status": "VARCHAR(32) NOT NULL DEFAULT ''",
+                "scheduler_message": "TEXT NOT NULL DEFAULT ''",
+                "scheduler_next_run_at": "DATETIME",
+            },
+        )
+        if "zimbra_mail_cleanup_settings" in tables:
+            connection.execute(
+                text(
+                    "UPDATE zimbra_mail_cleanup_settings "
+                    "SET schedule_changed_at = COALESCE("
+                    "schedule_changed_at, updated_at, created_at, CURRENT_TIMESTAMP) "
+                    "WHERE schedule_changed_at IS NULL"
+                )
+            )
 
         if "hr_source_records" in tables:
             add_missing_columns(

@@ -23,6 +23,17 @@ class ZimbraMailCleanupSettings(Base):
     )
     schedule_weekday: Mapped[int] = mapped_column(Integer, default=6)
     schedule_time: Mapped[str] = mapped_column(String(5), default="03:00")
+    schedule_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    scheduler_last_check_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    scheduler_status: Mapped[str] = mapped_column(String(32), default="")
+    scheduler_message: Mapped[str] = mapped_column(Text, default="")
+    scheduler_next_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     updated_by: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
