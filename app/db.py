@@ -120,7 +120,10 @@ def ensure_compatibility_schema() -> None:
         add_missing_columns(
             connection,
             "preliminary_dismissal_messages",
-            {"source_id": "VARCHAR(128) NOT NULL DEFAULT ''"},
+            {
+                "source_id": "VARCHAR(128) NOT NULL DEFAULT ''",
+                "source_rule_id": "INTEGER NOT NULL DEFAULT 0",
+            },
         )
 
         if "hr_source_records" in tables:

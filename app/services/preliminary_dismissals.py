@@ -7,14 +7,16 @@ import html
 import imaplib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from email import policy
 from email.header import decode_header
+from email.utils import parseaddr
 from html.parser import HTMLParser
 from zoneinfo import ZoneInfo
 
 from cryptography.fernet import Fernet, InvalidToken
+from email_validator import EmailNotValidError, validate_email
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
@@ -30,6 +32,7 @@ from app.models_preliminary_dismissals import (
     PreliminaryDismissalItem,
     PreliminaryDismissalMessage,
     PreliminaryDismissalSettings,
+    PreliminaryDismissalSourceRule,
 )
 from app.services.dismissal_notifications import DismissalNotificationService
 
@@ -46,6 +49,20 @@ def utcnow() -> datetime:
 def normalize_fio(value: str) -> str:
     text = " ".join(str(value or "").replace("ё", "е").replace("Ё", "Е").split())
     return text.casefold()
+
+
+def normalize_sender_email(value: str) -> str:
+    try:
+        return validate_email(
+            str(value or "").strip(),
+            check_deliverability=False,
+        ).normalized.casefold()
+    except EmailNotValidError as exc:
+        raise ValueError(f"Некорректный e-mail отправителя: {exc}") from exc
+
+
+def normalize_subject(value: str) -> str:
+    return " ".join(str(value or "").split()).casefold()
 
 
 def decode_mime(value: str | None) -> str:
@@ -99,6 +116,15 @@ class PreliminaryMail:
     subject: str
     body: str
     body_hash: str
+    source_rule_id: int = 0
+
+
+@dataclass(frozen=True)
+class PreliminaryMailSourceRule:
+    id: int
+    sender_email: str
+    subject_mode: str
+    subject_value: str
 
 
 @dataclass(frozen=True)
@@ -295,13 +321,22 @@ class PreliminaryDismissalImapService:
         *,
         after_uid: str,
         folder: str,
-        sender_filter: str,
-        subject_filter: str,
+        source_rules: list[PreliminaryMailSourceRule] | None = None,
+        sender_filter: str = "",
+        subject_filter: str = "",
     ) -> PreliminaryMailScan:
-        sender_filter = sender_filter.strip().casefold()
-        subject_filter = subject_filter.strip().casefold()
-        if not sender_filter or not subject_filter:
-            raise RuntimeError("Укажите фильтры отправителя и темы письма")
+        rules = list(source_rules or [])
+        if not rules and sender_filter.strip() and subject_filter.strip():
+            rules = [
+                PreliminaryMailSourceRule(
+                    id=0,
+                    sender_email=normalize_sender_email(sender_filter),
+                    subject_mode="contains",
+                    subject_value=subject_filter.strip(),
+                )
+            ]
+        if not rules:
+            raise RuntimeError("Добавьте хотя бы одно правило отправителя и темы")
         after_number = self._uid_number(after_uid)
         selected_folder = folder.strip() or "INBOX"
 
@@ -334,13 +369,37 @@ class PreliminaryDismissalImapService:
             for uid_bytes in uid_values:
                 uid = uid_bytes.decode()
                 item = self._from_raw(uid, self._fetch_raw(imap, uid))
-                if sender_filter not in item.sender.casefold():
+                matched_rule = next(
+                    (
+                        rule
+                        for rule in rules
+                        if self._matches_source_rule(item, rule)
+                    ),
+                    None,
+                )
+                if matched_rule is None:
                     continue
-                if subject_filter not in item.subject.casefold():
-                    continue
-                messages.append(item)
+                messages.append(
+                    replace(item, source_rule_id=int(matched_rule.id or 0))
+                )
             max_uid = max(self._uid_number(value) for value in uid_values)
             return PreliminaryMailScan(str(max_uid), tuple(messages))
+
+    @staticmethod
+    def _matches_source_rule(
+        item: PreliminaryMail,
+        rule: PreliminaryMailSourceRule,
+    ) -> bool:
+        sender = parseaddr(item.sender)[1].strip().casefold()
+        if sender != rule.sender_email.strip().casefold():
+            return False
+        subject = normalize_subject(item.subject)
+        expected = normalize_subject(rule.subject_value)
+        if not expected:
+            return False
+        if rule.subject_mode == "exact":
+            return subject == expected
+        return expected in subject
 
 
 class PreliminaryDismissalService:
@@ -385,8 +444,55 @@ class PreliminaryDismissalService:
                 imap_username=row.imap_username,
                 imap_folder=row.imap_folder,
                 imap_lookback_days=row.imap_lookback_days,
-                sender_filter=row.sender_filter,
-                subject_filter=row.subject_filter,
+            )
+            changed = True
+        if changed:
+            self.db.commit()
+
+    def _migrate_legacy_source_rules(self) -> None:
+        """Преобразовать старую пару отправитель+тема в первую запись списка."""
+
+        settings_rows = list(
+            self.db.scalars(
+                select(PreliminaryDismissalSettings).order_by(
+                    PreliminaryDismissalSettings.id
+                )
+            ).all()
+        )
+        configured_ids = set(
+            self.db.scalars(
+                select(PreliminaryDismissalSourceRule.settings_id).distinct()
+            ).all()
+        )
+        changed = False
+        for row in settings_rows:
+            if row.id in configured_ids:
+                continue
+            sender_value = str(row.sender_filter or "").strip()
+            subject_value = str(row.subject_filter or "").strip()
+            if not sender_value or not subject_value:
+                continue
+            candidate = parseaddr(sender_value)[1] or sender_value
+            try:
+                sender_email = normalize_sender_email(candidate)
+            except ValueError as exc:
+                row.enabled = False
+                row.last_status = "failed"
+                row.last_error = (
+                    "Не удалось перенести прежнего отправителя: " + str(exc)
+                )
+                changed = True
+                continue
+            self.db.add(
+                PreliminaryDismissalSourceRule(
+                    settings_id=int(row.id),
+                    enabled=True,
+                    label="Перенесено из прежней настройки",
+                    sender_email=sender_email,
+                    subject_mode="contains",
+                    subject_value=subject_value,
+                    updated_by=row.updated_by,
+                )
             )
             changed = True
         if changed:
@@ -394,6 +500,7 @@ class PreliminaryDismissalService:
 
     def list_settings(self) -> list[PreliminaryDismissalSettings]:
         self._migrate_legacy_settings()
+        self._migrate_legacy_source_rules()
         return list(
             self.db.scalars(
                 select(PreliminaryDismissalSettings).order_by(
@@ -410,6 +517,7 @@ class PreliminaryDismissalService:
     ) -> PreliminaryDismissalSettings | None:
         """Совместимый доступ к первому правилу; новые вызовы передают rule_id."""
         self._migrate_legacy_settings()
+        self._migrate_legacy_source_rules()
         if rule_id is not None:
             row = self.db.get(PreliminaryDismissalSettings, rule_id)
         else:
@@ -425,6 +533,156 @@ class PreliminaryDismissalService:
             self.db.refresh(row)
         return row
 
+    def list_source_rules(
+        self,
+        settings_id: int,
+        *,
+        enabled_only: bool = False,
+    ) -> list[PreliminaryDismissalSourceRule]:
+        statement = select(PreliminaryDismissalSourceRule).where(
+            PreliminaryDismissalSourceRule.settings_id == int(settings_id)
+        )
+        if enabled_only:
+            statement = statement.where(
+                PreliminaryDismissalSourceRule.enabled.is_(True)
+            )
+        return list(
+            self.db.scalars(
+                statement.order_by(
+                    PreliminaryDismissalSourceRule.id
+                )
+            ).all()
+        )
+
+    def get_source_rule(
+        self,
+        source_rule_id: int,
+    ) -> PreliminaryDismissalSourceRule:
+        row = self.db.get(
+            PreliminaryDismissalSourceRule,
+            int(source_rule_id),
+        )
+        if row is None:
+            raise ValueError("Правило отправителя не найдено")
+        return row
+
+    @staticmethod
+    def _reset_mail_cursor(
+        settings_row: PreliminaryDismissalSettings,
+        *,
+        message: str,
+        operator: str,
+    ) -> None:
+        settings_row.last_scanned_uid = ""
+        settings_row.last_status = "reset"
+        settings_row.last_error = message
+        settings_row.updated_by = str(operator or "")[:256]
+        settings_row.updated_at = utcnow()
+
+    def save_source_rule(
+        self,
+        *,
+        settings_id: int,
+        source_rule_id: int | None,
+        enabled: bool,
+        label: str,
+        sender_email: str,
+        subject_mode: str,
+        subject_value: str,
+        operator: str,
+    ) -> PreliminaryDismissalSourceRule:
+        settings_row = self.get_settings(int(settings_id), create=False)
+        if settings_row is None:
+            raise ValueError("Настройка организации не найдена")
+        normalized_sender = normalize_sender_email(sender_email)
+        normalized_mode = str(subject_mode or "").strip().casefold()
+        if normalized_mode not in {"contains", "exact"}:
+            raise ValueError("Выберите проверку темы: содержит или совпадает")
+        normalized_subject = " ".join(str(subject_value or "").split())
+        if not normalized_subject:
+            raise ValueError("Укажите условие по теме письма")
+        if len(normalized_subject) > 512:
+            raise ValueError("Условие по теме слишком длинное")
+        normalized_label = " ".join(str(label or "").split())
+        if len(normalized_label) > 256:
+            raise ValueError("Пояснение слишком длинное")
+
+        row = (
+            self.get_source_rule(source_rule_id)
+            if source_rule_id
+            else PreliminaryDismissalSourceRule(settings_id=int(settings_id))
+        )
+        if row.settings_id != int(settings_id):
+            raise ValueError("Правило относится к другой организации")
+        duplicate = self.db.scalar(
+            select(PreliminaryDismissalSourceRule).where(
+                PreliminaryDismissalSourceRule.settings_id == int(settings_id),
+                PreliminaryDismissalSourceRule.sender_email == normalized_sender,
+                PreliminaryDismissalSourceRule.subject_mode == normalized_mode,
+                PreliminaryDismissalSourceRule.subject_value == normalized_subject,
+                PreliminaryDismissalSourceRule.id != int(source_rule_id or 0),
+            )
+        )
+        if duplicate is not None:
+            raise ValueError("Такое правило отправителя и темы уже существует")
+        if settings_row.enabled and not enabled:
+            enabled_others = sum(
+                item.enabled
+                for item in self.list_source_rules(int(settings_id))
+                if item.id != int(source_rule_id or 0)
+            )
+            if not enabled_others:
+                raise ValueError(
+                    "Нельзя выключить последнее правило включённой организации"
+                )
+        if not source_rule_id:
+            self.db.add(row)
+        row.enabled = bool(enabled)
+        row.label = normalized_label
+        row.sender_email = normalized_sender
+        row.subject_mode = normalized_mode
+        row.subject_value = normalized_subject
+        row.updated_by = str(operator or "")[:256]
+        row.updated_at = utcnow()
+        self._reset_mail_cursor(
+            settings_row,
+            message="Правила отправителей изменены; почтовый курсор сброшен",
+            operator=operator,
+        )
+        self.db.commit()
+        self.db.refresh(row)
+        return row
+
+    def delete_source_rule(
+        self,
+        *,
+        settings_id: int,
+        source_rule_id: int,
+        operator: str,
+    ) -> None:
+        settings_row = self.get_settings(int(settings_id), create=False)
+        if settings_row is None:
+            raise ValueError("Настройка организации не найдена")
+        row = self.get_source_rule(source_rule_id)
+        if row.settings_id != int(settings_id):
+            raise ValueError("Правило относится к другой организации")
+        enabled_others = sum(
+            item.enabled
+            for item in self.list_source_rules(int(settings_id))
+            if item.id != row.id
+        )
+        if settings_row.enabled and not enabled_others:
+            raise ValueError(
+                "Нельзя удалить последнее правило включённой организации"
+            )
+        self.db.delete(row)
+        self._reset_mail_cursor(
+            settings_row,
+            message="Правила отправителей изменены; почтовый курсор сброшен",
+            operator=operator,
+        )
+        self.db.commit()
+
     @staticmethod
     def _config_key(
         *,
@@ -435,8 +693,6 @@ class PreliminaryDismissalService:
         imap_username: str,
         imap_folder: str,
         imap_lookback_days: int,
-        sender_filter: str,
-        subject_filter: str,
     ) -> str:
         raw = "\n".join(
             (
@@ -447,8 +703,6 @@ class PreliminaryDismissalService:
                 imap_username.casefold(),
                 imap_folder,
                 str(imap_lookback_days),
-                sender_filter.casefold(),
-                subject_filter.casefold(),
             )
         )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -469,6 +723,7 @@ class PreliminaryDismissalService:
         sender_filter: str,
         subject_filter: str,
         operator: str,
+        subject_mode: str = "contains",
     ) -> PreliminaryDismissalSettings:
         source_id = source_id.strip().lower()
         imap_host = imap_host.strip()
@@ -476,6 +731,7 @@ class PreliminaryDismissalService:
         imap_folder = imap_folder.strip() or "INBOX"
         sender_filter = sender_filter.strip()
         subject_filter = subject_filter.strip()
+        subject_mode = str(subject_mode or "contains").strip().casefold()
         try:
             imap_port = int(imap_port)
         except (TypeError, ValueError) as exc:
@@ -513,19 +769,13 @@ class PreliminaryDismissalService:
             raise ValueError("Укажите IMAP-сервер")
         if not imap_username:
             raise ValueError("Укажите почтовый ящик или логин IMAP")
-        if enabled and not sender_filter:
-            raise ValueError("Укажите доверенного отправителя")
-        if enabled and "@" not in sender_filter:
-            raise ValueError("Укажите полный e-mail доверенного отправителя")
-        if enabled and not subject_filter:
-            raise ValueError("Укажите часть темы кадрового письма")
-
         row = self.get_settings(rule_id, create=False) if rule_id else None
         if rule_id and row is None:
             raise ValueError("Настройка организации не найдена")
         if row is None:
             row = PreliminaryDismissalSettings()
             self.db.add(row)
+        self.db.flush()
         if imap_password:
             row.imap_password_encrypted = self.secret_box.encrypt(imap_password)
         if enabled and not row.imap_password_encrypted:
@@ -538,8 +788,6 @@ class PreliminaryDismissalService:
             imap_username=imap_username,
             imap_folder=imap_folder,
             imap_lookback_days=imap_lookback_days,
-            sender_filter=sender_filter,
-            subject_filter=subject_filter,
         )
         if row.config_key and row.config_key != new_key:
             row.last_scanned_uid = ""
@@ -553,8 +801,32 @@ class PreliminaryDismissalService:
         row.imap_username = imap_username
         row.imap_folder = imap_folder
         row.imap_lookback_days = imap_lookback_days
-        row.sender_filter = sender_filter
-        row.subject_filter = subject_filter
+        if sender_filter or subject_filter:
+            if not sender_filter or not subject_filter:
+                raise ValueError("Укажите и отправителя, и условие по теме")
+            if subject_mode not in {"contains", "exact"}:
+                raise ValueError("Выберите проверку темы: содержит или совпадает")
+            normalized_sender = normalize_sender_email(sender_filter)
+            existing_source_rules = self.list_source_rules(int(row.id))
+            legacy_source_rule = (
+                existing_source_rules[0] if existing_source_rules else None
+            )
+            if legacy_source_rule is None:
+                legacy_source_rule = PreliminaryDismissalSourceRule(
+                    settings_id=int(row.id),
+                    enabled=True,
+                )
+                self.db.add(legacy_source_rule)
+            legacy_source_rule.sender_email = normalized_sender
+            legacy_source_rule.subject_mode = subject_mode
+            legacy_source_rule.subject_value = subject_filter
+            legacy_source_rule.updated_by = str(operator or "")[:256]
+            legacy_source_rule.updated_at = utcnow()
+            row.sender_filter = normalized_sender
+            row.subject_filter = subject_filter
+        self.db.flush()
+        if enabled and not self.list_source_rules(int(row.id), enabled_only=True):
+            raise ValueError("Добавьте хотя бы одно включённое правило отправителя")
         row.config_key = new_key
         row.updated_by = operator
         row.updated_at = utcnow()
@@ -784,6 +1056,7 @@ class PreliminaryDismissalService:
         row = PreliminaryDismissalMessage(
             message_key=message_key,
             source_id=source.source_id,
+            source_rule_id=int(item.source_rule_id or 0),
             imap_uid=item.uid,
             message_id=item.message_id,
             message_date=item.message_date,
@@ -982,6 +1255,22 @@ class PreliminaryDismissalService:
         password = ""
         try:
             password = self.secret_box.decrypt(config.imap_password_encrypted)
+            source_rules = [
+                PreliminaryMailSourceRule(
+                    id=int(rule.id),
+                    sender_email=rule.sender_email,
+                    subject_mode=rule.subject_mode,
+                    subject_value=rule.subject_value,
+                )
+                for rule in self.list_source_rules(
+                    int(config.id),
+                    enabled_only=True,
+                )
+            ]
+            if not source_rules:
+                raise RuntimeError(
+                    "Нет включённых правил отправителя и темы письма"
+                )
             config.last_checked_at = utcnow()
             self.db.commit()
             scan = PreliminaryDismissalImapService(
@@ -994,8 +1283,7 @@ class PreliminaryDismissalService:
             ).scan(
                 after_uid=config.last_scanned_uid,
                 folder=config.imap_folder,
-                sender_filter=config.sender_filter,
-                subject_filter=config.subject_filter,
+                source_rules=source_rules,
             )
             parsed_count = 0
             matched_count = 0
@@ -1130,6 +1418,7 @@ class PreliminaryDismissalService:
         rules: list[dict[str, object]] = []
         for config in self.list_settings():
             source = self._source(config.source_id) if config.source_id else None
+            source_rule_rows = self.list_source_rules(int(config.id))
             counts = {
                 status: int(
                     self.db.scalar(
@@ -1162,6 +1451,20 @@ class PreliminaryDismissalService:
                     },
                     "source_name": source.name if source is not None else config.source_id,
                     "password_configured": bool(config.imap_password_encrypted),
+                    "source_rules": [
+                        {
+                            "id": source_rule.id,
+                            "enabled": source_rule.enabled,
+                            "label": source_rule.label,
+                            "sender_email": source_rule.sender_email,
+                            "subject_mode": source_rule.subject_mode,
+                            "subject_value": source_rule.subject_value,
+                        }
+                        for source_rule in source_rule_rows
+                    ],
+                    "source_rules_enabled": sum(
+                        source_rule.enabled for source_rule in source_rule_rows
+                    ),
                     "counts": counts,
                     "status_label": self._status_label(config.last_status),
                     "messages": int(

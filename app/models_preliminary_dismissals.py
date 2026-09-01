@@ -46,6 +46,36 @@ class PreliminaryDismissalSettings(Base):
     )
 
 
+class PreliminaryDismissalSourceRule(Base):
+    """Один доверенный отправитель и его условие по теме письма."""
+
+    __tablename__ = "preliminary_dismissal_source_rules"
+    __table_args__ = (
+        UniqueConstraint(
+            "settings_id",
+            "sender_email",
+            "subject_mode",
+            "subject_value",
+            name="uq_preliminary_source_rule_match",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    settings_id: Mapped[int] = mapped_column(Integer, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    label: Mapped[str] = mapped_column(String(256), default="")
+    sender_email: Mapped[str] = mapped_column(String(320), index=True)
+    subject_mode: Mapped[str] = mapped_column(String(16), default="contains")
+    subject_value: Mapped[str] = mapped_column(String(512))
+    updated_by: Mapped[str] = mapped_column(String(256), default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class PreliminaryDismissalMessage(Base):
     """Обработанное входящее письмо; Message-ID/хеш не дают прочитать его дважды."""
 
@@ -54,6 +84,7 @@ class PreliminaryDismissalMessage(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     message_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
     source_id: Mapped[str] = mapped_column(String(128), default="", index=True)
+    source_rule_id: Mapped[int] = mapped_column(Integer, default=0, index=True)
     imap_uid: Mapped[str] = mapped_column(String(128), default="", index=True)
     message_id: Mapped[str] = mapped_column(String(1024), default="")
     message_date: Mapped[str] = mapped_column(String(256), default="")

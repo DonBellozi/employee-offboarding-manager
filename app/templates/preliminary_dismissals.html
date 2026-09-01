@@ -4,7 +4,7 @@
 <div class="heading-row">
   <div>
     <h1>Предварительные увольнения</h1>
-    <p class="muted">Для каждой организации можно подключить свой кадровый ящик.</p>
+    <p class="muted">Для каждой организации можно подключить ящик и несколько доверенных отправителей.</p>
   </div>
   <a class="button secondary" href="/settings">Настройки</a>
 </div>
@@ -57,68 +57,152 @@
     </div>
   </div>
 
-  <form method="post" action="/settings/preliminary-dismissals/save" class="settings-source-form">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="hidden" name="rule_id" value="{{ item.id }}">
-    <div class="settings-source-grid">
+  <div class="preliminary-source-rules">
+    <div class="observer-card-heading preliminary-source-heading">
+      <div>
+        <h3>Отправители уведомлений</h3>
+        <p class="muted">Письмо принимается только при совпадении адреса и условия по теме.</p>
+      </div>
+      <span class="integration-badge{% if rule.source_rules_enabled %} active{% endif %}">
+        {{ rule.source_rules_enabled }} включено
+      </span>
+    </div>
+
+    {% for source_rule in rule.source_rules %}
+    <form method="post" action="/settings/preliminary-dismissals/source-rules/save" class="preliminary-source-rule-row">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="settings_id" value="{{ item.id }}">
+      <input type="hidden" name="source_rule_id" value="{{ source_rule.id }}">
       <label>
-        <span>Организация</span>
-        <select name="source_id" required>
-          {% for source in sources %}
-          <option value="{{ source.source_id }}"{% if item.source_id == source.source_id %} selected{% endif %}>{{ source.name }}</option>
-          {% endfor %}
+        <span>Кто отправляет</span>
+        <input type="text" name="label" maxlength="256" value="{{ source_rule.label }}" placeholder="Иванова, отдел кадров">
+      </label>
+      <label>
+        <span>E-mail отправителя</span>
+        <input type="email" name="sender_email" value="{{ source_rule.sender_email }}" required>
+      </label>
+      <label>
+        <span>Проверка темы</span>
+        <select name="subject_mode">
+          <option value="contains"{% if source_rule.subject_mode == 'contains' %} selected{% endif %}>Содержит</option>
+          <option value="exact"{% if source_rule.subject_mode == 'exact' %} selected{% endif %}>Точно совпадает</option>
         </select>
       </label>
-      <label>
-        <span>IMAP-сервер</span>
-        <input type="text" name="imap_host" value="{{ item.imap_host }}" placeholder="imap.company.ru" required>
+      <label class="preliminary-subject-value">
+        <span>Значение темы</span>
+        <input type="text" name="subject_value" maxlength="512" value="{{ source_rule.subject_value }}" required>
       </label>
-      <label>
-        <span>Порт IMAP</span>
-        <input type="number" name="imap_port" value="{{ item.imap_port }}" min="1" max="65535" required>
+      <label class="preliminary-source-enabled">
+        <input type="checkbox" name="enabled" value="on"{% if source_rule.enabled %} checked{% endif %}>
+        <span>Включено</span>
       </label>
-      <label>
-        <span>Почтовый ящик / логин</span>
-        <input type="text" name="imap_username" value="{{ item.imap_username }}" autocomplete="username" required>
-      </label>
-      <label>
-        <span>Пароль IMAP</span>
-        <input type="password" name="imap_password" value="" autocomplete="new-password" placeholder="{{ 'Оставьте пустым — пароль сохранён' if rule.password_configured else 'Введите пароль' }}">
-      </label>
-      <label>
-        <span>Папка IMAP</span>
-        <input type="text" name="imap_folder" value="{{ item.imap_folder or 'INBOX' }}" required>
-      </label>
-      <label>
-        <span>Искать письма за, дней</span>
-        <input type="number" name="imap_lookback_days" value="{{ item.imap_lookback_days }}" min="1" max="365" required>
-      </label>
-      <label>
-        <span>Письмо от</span>
-        <input type="email" name="sender_filter" value="{{ item.sender_filter }}" placeholder="hr@company.ru">
-      </label>
-      <label>
-        <span>Тема содержит</span>
-        <input type="text" name="subject_filter" value="{{ item.subject_filter }}" placeholder="Увольнение">
-      </label>
-    </div>
-    <div class="preliminary-mailbox-flags">
-      <label class="observer-check-row">
-        <input type="checkbox" name="imap_ssl" value="on"{% if item.imap_ssl %} checked{% endif %}>
-        <span><strong>Защищённое подключение SSL/TLS</strong></span>
-      </label>
-      <label class="observer-check-row">
-        <input type="checkbox" name="enabled" value="on"{% if item.enabled %} checked{% endif %}>
-        <span>
-          <strong>Получать уведомления этой организации</strong>
-          <small>Фоновая проверка выполняется раз в минуту.</small>
-        </span>
-      </label>
-    </div>
-    <div class="observer-form-actions">
-      <button class="button" type="submit">Сохранить</button>
-    </div>
-  </form>
+      <div class="preliminary-source-actions">
+        <button class="button small secondary" type="submit">Сохранить</button>
+        <button class="button small danger" type="submit"
+                formaction="/settings/preliminary-dismissals/source-rules/delete"
+                onclick="return confirm('Удалить этого отправителя и его условие темы?');">Удалить</button>
+      </div>
+    </form>
+    {% else %}
+    <div class="alert warning">Нет правил отправителей. Включить получение писем пока нельзя.</div>
+    {% endfor %}
+
+    <details class="preliminary-add-source-rule">
+      <summary>Добавить отправителя</summary>
+      <form method="post" action="/settings/preliminary-dismissals/source-rules/save" class="preliminary-source-rule-row new">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="settings_id" value="{{ item.id }}">
+        <input type="hidden" name="source_rule_id" value="0">
+        <label>
+          <span>Кто отправляет</span>
+          <input type="text" name="label" maxlength="256" placeholder="Пояснение необязательно">
+        </label>
+        <label>
+          <span>E-mail отправителя</span>
+          <input type="email" name="sender_email" placeholder="hr@company.ru" required>
+        </label>
+        <label>
+          <span>Проверка темы</span>
+          <select name="subject_mode">
+            <option value="contains">Содержит</option>
+            <option value="exact">Точно совпадает</option>
+          </select>
+        </label>
+        <label class="preliminary-subject-value">
+          <span>Значение темы</span>
+          <input type="text" name="subject_value" maxlength="512" placeholder="Увольнение" required>
+        </label>
+        <label class="preliminary-source-enabled">
+          <input type="checkbox" name="enabled" value="on" checked>
+          <span>Включено</span>
+        </label>
+        <div class="preliminary-source-actions">
+          <button class="button small" type="submit">Добавить</button>
+        </div>
+      </form>
+    </details>
+  </div>
+
+  <details class="preliminary-connection-details"{% if item.last_status == 'failed' or not item.imap_host or not item.imap_username or not rule.password_configured %} open{% endif %}>
+    <summary>
+      <span><strong>Подключение и дополнительные настройки</strong></span>
+      <span class="muted">{{ item.imap_username }} · {{ item.imap_folder or 'INBOX' }} · {{ item.imap_lookback_days }} дн.</span>
+    </summary>
+    <form method="post" action="/settings/preliminary-dismissals/save" class="settings-source-form">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="rule_id" value="{{ item.id }}">
+      <div class="settings-source-grid">
+        <label>
+          <span>Организация</span>
+          <select name="source_id" required>
+            {% for source in sources %}
+            <option value="{{ source.source_id }}"{% if item.source_id == source.source_id %} selected{% endif %}>{{ source.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>
+          <span>IMAP-сервер</span>
+          <input type="text" name="imap_host" value="{{ item.imap_host }}" placeholder="imap.company.ru" required>
+        </label>
+        <label>
+          <span>Порт IMAP</span>
+          <input type="number" name="imap_port" value="{{ item.imap_port }}" min="1" max="65535" required>
+        </label>
+        <label>
+          <span>Почтовый ящик / логин</span>
+          <input type="text" name="imap_username" value="{{ item.imap_username }}" autocomplete="username" required>
+        </label>
+        <label>
+          <span>Пароль IMAP</span>
+          <input type="password" name="imap_password" value="" autocomplete="new-password" placeholder="{{ 'Оставьте пустым — пароль сохранён' if rule.password_configured else 'Введите пароль' }}">
+        </label>
+        <label>
+          <span>Папка IMAP</span>
+          <input type="text" name="imap_folder" value="{{ item.imap_folder or 'INBOX' }}" required>
+        </label>
+        <label>
+          <span>Искать письма за, дней</span>
+          <input type="number" name="imap_lookback_days" value="{{ item.imap_lookback_days }}" min="1" max="365" required>
+        </label>
+      </div>
+      <div class="preliminary-mailbox-flags">
+        <label class="observer-check-row">
+          <input type="checkbox" name="imap_ssl" value="on"{% if item.imap_ssl %} checked{% endif %}>
+          <span><strong>Защищённое подключение SSL/TLS</strong></span>
+        </label>
+        <label class="observer-check-row">
+          <input type="checkbox" name="enabled" value="on"{% if item.enabled %} checked{% endif %}>
+          <span>
+            <strong>Получать уведомления этой организации</strong>
+            <small>Фоновая проверка выполняется раз в минуту.</small>
+          </span>
+        </label>
+      </div>
+      <div class="observer-form-actions">
+        <button class="button" type="submit">Сохранить подключение</button>
+      </div>
+    </form>
+  </details>
 
   <div class="settings-status-grid">
     <div><span>Писем обработано</span><strong>{{ rule.messages }}</strong></div>
@@ -141,7 +225,7 @@
   <div class="observer-card-heading">
     <div>
       <h2>Добавить организацию</h2>
-      <p class="muted">Одна организация — одно правило и свой почтовый курсор.</p>
+      <p class="muted">Одна организация — один ящик, свой почтовый курсор и отдельные правила отправителей.</p>
     </div>
   </div>
   {% if not new_sources %}
@@ -183,11 +267,18 @@
         <input type="number" name="imap_lookback_days" value="{{ summary.new_rule.imap_lookback_days }}" min="1" max="365" required>
       </label>
       <label>
-        <span>Письмо от</span>
+        <span>Первый отправитель</span>
         <input type="email" name="sender_filter" value="" placeholder="hr@company.ru" required>
       </label>
       <label>
-        <span>Тема содержит</span>
+        <span>Проверка темы</span>
+        <select name="subject_mode">
+          <option value="contains">Содержит</option>
+          <option value="exact">Точно совпадает</option>
+        </select>
+      </label>
+      <label>
+        <span>Значение темы</span>
         <input type="text" name="subject_filter" value="" placeholder="Увольнение" required>
       </label>
     </div>
