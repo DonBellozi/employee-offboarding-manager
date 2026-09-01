@@ -127,6 +127,7 @@ class MailboxResult:
     mailbox: str
     found: int
     deleted: int
+    remaining: int
     truncated: bool
     duration_ms: int
     error: str = ""
@@ -615,6 +616,7 @@ class ZimbraMailCleanupService:
                     mailbox=mailbox,
                     found=0,
                     deleted=0,
+                    remaining=0,
                     truncated=False,
                     duration_ms=elapsed,
                     error=str(exc)[:2000],
@@ -628,6 +630,7 @@ class ZimbraMailCleanupService:
                 rule_started = time.monotonic()
                 found = 0
                 deleted = 0
+                remaining = 0
                 truncated = False
                 error = ""
                 try:
@@ -662,6 +665,25 @@ class ZimbraMailCleanupService:
                             break
                         if pass_number == MAX_DELETE_PASSES - 1:
                             truncated = True
+                    if delete and deleted:
+                        verification_output = zimbra.execute_mailbox_command(
+                            client,
+                            mailbox,
+                            [
+                                "search",
+                                "-t",
+                                "message",
+                                "-l",
+                                str(SEARCH_LIMIT),
+                                self.build_query(execution),
+                            ],
+                            timeout=180,
+                        )
+                        verification = self.parse_search_output(
+                            verification_output
+                        )
+                        remaining = len(verification.message_ids)
+                        truncated = bool(remaining or verification.more)
                 except Exception as exc:
                     error = str(exc)[:2000]
                 results.append(
@@ -670,6 +692,7 @@ class ZimbraMailCleanupService:
                         mailbox=mailbox,
                         found=found,
                         deleted=deleted,
+                        remaining=remaining,
                         truncated=truncated,
                         duration_ms=int((time.monotonic() - rule_started) * 1000),
                         error=error,
@@ -690,6 +713,11 @@ class ZimbraMailCleanupService:
         status: str = "running",
     ) -> ZimbraMailCleanupRun:
         now = utcnow()
+        execution = self._execution(rule)
+        cutoff_date = (
+            now.astimezone(ZoneInfo(self.settings.app_timezone)).date()
+            - timedelta(days=int(rule.retention_days))
+        )
         row = ZimbraMailCleanupRun(
             rule_id=int(rule.id),
             rule_name=rule.name,
@@ -699,6 +727,8 @@ class ZimbraMailCleanupService:
             initiated_by=str(actor or "")[:256],
             source_preview_run_id=int(preview_run_id or 0),
             rule_snapshot_json=self._snapshot_json(rule),
+            search_query=self.build_query(execution),
+            search_cutoff_date=cutoff_date,
             started_at=now,
             progress_at=now,
         )
@@ -913,9 +943,11 @@ class ZimbraMailCleanupService:
             matched = [item for item in rule_results if item.found > 0]
             run.checked_mailboxes = applicable_counts.get(int(rule.id), 0)
             run.processed_mailboxes = run.checked_mailboxes
+            run.batch_processed_mailboxes = run.batch_checked_mailboxes
             run.matched_mailboxes = len(matched)
             run.found_messages = sum(item.found for item in rule_results)
             run.deleted_messages = sum(item.deleted for item in rule_results)
+            run.remaining_messages = sum(item.remaining for item in rule_results)
             run.truncated_mailboxes = len(truncated)
             run.error_count = len(errors)
             run.duration_ms = int((time.monotonic() - started) * 1000)
@@ -925,12 +957,19 @@ class ZimbraMailCleanupService:
                         "mailbox": item.mailbox,
                         "found": item.found,
                         "deleted": item.deleted,
+                        "remaining": item.remaining,
                         "truncated": item.truncated,
                         "duration_ms": item.duration_ms,
                         "error": item.error,
                     }
                     for item in rule_results
-                    if item.found or item.deleted or item.truncated or item.error
+                    if (
+                        item.found
+                        or item.deleted
+                        or item.remaining
+                        or item.truncated
+                        or item.error
+                    )
                 ],
                 ensure_ascii=False,
             )
@@ -951,8 +990,7 @@ class ZimbraMailCleanupService:
                 )
             elif truncated:
                 run.error_message = (
-                    f"В {len(truncated)} ящиках после удаления "
-                    f"{SEARCH_LIMIT * MAX_DELETE_PASSES} сообщений остались "
+                    f"В {len(truncated)} ящиках после удаления остались "
                     "подходящие письма. Повторите проверку и очистку."
                 )
             else:
@@ -972,6 +1010,7 @@ class ZimbraMailCleanupService:
                     "checked_mailboxes": run.checked_mailboxes,
                     "found_messages": run.found_messages,
                     "deleted_messages": run.deleted_messages,
+                    "remaining_messages": run.remaining_messages,
                     "error_count": run.error_count,
                 },
             )
@@ -1068,14 +1107,27 @@ class ZimbraMailCleanupService:
                 run.progress_at = now
                 run.checked_mailboxes = 0
                 run.processed_mailboxes = 0
+                run.batch_checked_mailboxes = 0
+                run.batch_processed_mailboxes = 0
                 run.matched_mailboxes = 0
                 run.found_messages = 0
                 run.deleted_messages = 0
+                run.remaining_messages = 0
                 run.truncated_mailboxes = 0
                 run.error_count = 0
                 run.duration_ms = 0
                 run.details_json = "[]"
                 run.error_message = ""
+                execution = self._execution(
+                    next(rule for rule in rules if int(rule.id) == run.rule_id)
+                )
+                run.search_query = self.build_query(execution)
+                run.search_cutoff_date = (
+                    now.astimezone(
+                        ZoneInfo(self.settings.app_timezone)
+                    ).date()
+                    - timedelta(days=execution.retention_days)
+                )
         self.db.commit()
         try:
             zimbra = ZimbraService(self.settings)
@@ -1103,9 +1155,11 @@ class ZimbraMailCleanupService:
                     for execution in executions
                 }
                 progress_at = utcnow()
+                batch_mailbox_count = len(mailbox_executions)
                 for rule in rules:
                     run = runs[int(rule.id)]
                     run.checked_mailboxes = applicable_counts[int(rule.id)]
+                    run.batch_checked_mailboxes = batch_mailbox_count
                     run.progress_at = progress_at
                 self.db.commit()
                 results: list[MailboxResult] = []
@@ -1120,6 +1174,7 @@ class ZimbraMailCleanupService:
                     max_workers=workers,
                     thread_name_prefix="zimbra-mail-cleanup",
                 ) as pool:
+                    batch_processed_mailboxes = 0
                     futures = [
                         pool.submit(
                             self._process_mailbox,
@@ -1133,13 +1188,19 @@ class ZimbraMailCleanupService:
                     for future in as_completed(futures):
                         mailbox_results = future.result()
                         results.extend(mailbox_results)
+                        batch_processed_mailboxes += 1
                         progress_at = utcnow()
+                        for run in runs.values():
+                            run.batch_processed_mailboxes = (
+                                batch_processed_mailboxes
+                            )
                         for result in mailbox_results:
                             run = runs[result.rule_id]
                             run.processed_mailboxes += 1
                             run.matched_mailboxes += int(result.found > 0)
                             run.found_messages += result.found
                             run.deleted_messages += result.deleted
+                            run.remaining_messages += result.remaining
                             run.truncated_mailboxes += int(result.truncated)
                             run.error_count += int(bool(result.error))
                             run.duration_ms = int(

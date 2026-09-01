@@ -130,7 +130,12 @@ def ensure_compatibility_schema() -> None:
             "zimbra_mail_cleanup_runs",
             {
                 "processed_mailboxes": "INTEGER NOT NULL DEFAULT 0",
+                "batch_checked_mailboxes": "INTEGER NOT NULL DEFAULT 0",
+                "batch_processed_mailboxes": "INTEGER NOT NULL DEFAULT 0",
+                "remaining_messages": "INTEGER NOT NULL DEFAULT 0",
                 "progress_at": "DATETIME",
+                "search_query": "TEXT NOT NULL DEFAULT ''",
+                "search_cutoff_date": "DATE",
             },
         )
         add_missing_columns(

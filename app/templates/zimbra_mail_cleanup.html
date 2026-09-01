@@ -31,30 +31,46 @@
            data-active="{{ 'true' if active_runs else 'false' }}"
            aria-live="polite"
            {% if not active_runs %}hidden{% endif %}>
+    {% set cleanup_active = active_runs and active_runs|selectattr('mode', 'ne', 'dry_run')|list %}
     <div class="cleanup-live-heading">
       <span class="cleanup-spinner" aria-hidden="true"></span>
       <div>
         <h2 data-cleanup-progress-title>
-          {% if active_runs and active_runs|selectattr('mode', 'ne', 'dry_run')|list %}Очистка выполняется{% else %}Проверка выполняется{% endif %}
+          {% if cleanup_active %}Очистка выполняется{% else %}Проверка выполняется{% endif %}
         </h2>
         <p class="muted" data-cleanup-progress-note>Страница обновляет состояние автоматически.</p>
       </div>
     </div>
     <div class="cleanup-progress-runs" data-cleanup-progress-runs>
+      <article class="cleanup-progress-run cleanup-progress-overall">
+        <div class="cleanup-progress-caption">
+          <strong>Общий проход по почтовым ящикам</strong>
+          <span>{{ active_runs|length }} {{ 'правило' if active_runs|length == 1 else 'правила' if active_runs|length in [2, 3, 4] else 'правил' }}</span>
+        </div>
+        <progress max="{{ active_progress.total_mailboxes if active_progress.total_mailboxes else 1 }}"
+                  value="{{ active_progress.processed_mailboxes }}"></progress>
+        <div class="cleanup-progress-meta">
+          <span>{% if active_progress.total_mailboxes %}Проверено {{ active_progress.processed_mailboxes }} из {{ active_progress.total_mailboxes }}{% else %}Подготовка списка ящиков…{% endif %}</span>
+          <span>Один проход по ящикам для всех правил</span>
+        </div>
+      </article>
+      <div class="cleanup-progress-rule-stats">
       {% for run in active_runs %}
-      <article class="cleanup-progress-run">
+      <article class="cleanup-progress-rule-stat">
         <div class="cleanup-progress-caption">
           <strong>{{ run.rule_name }}</strong>
           <span>{{ mode_labels.get(run.mode, run.mode) }} · {{ status_labels.get(run.status, run.status) }}</span>
         </div>
-        <progress max="{{ run.checked_mailboxes if run.checked_mailboxes else 1 }}"
-                  value="{{ run.processed_mailboxes }}"></progress>
-        <div class="cleanup-progress-meta">
-          <span>{% if run.checked_mailboxes %}Проверено {{ run.processed_mailboxes }} из {{ run.checked_mailboxes }}{% else %}Подготовка списка ящиков…{% endif %}</span>
-          <span>Найдено: {{ run.found_messages }} · Удалено: {{ run.deleted_messages }} · Ошибок: {{ run.error_count }}</span>
-        </div>
+        <span class="cleanup-progress-rule-values">
+          {% if run.mode == 'dry_run' %}
+            Под удаление: {{ run.found_messages }} · Ошибок: {{ run.error_count }}
+          {% else %}
+            Найдено: {{ run.found_messages }} · Команда удаления: {{ run.deleted_messages }} · Осталось: {{ run.remaining_messages }} · Ошибок: {{ run.error_count }}
+          {% endif %}
+        </span>
       </article>
       {% endfor %}
+      </div>
     </div>
   </section>
 
@@ -353,11 +369,27 @@
         {{ status_labels.get(selected_run.status, selected_run.status) }}
       </span>
     </div>
+    {% if selected_run.search_query %}
+    <div class="cleanup-query-summary">
+      <span>Фактический фильтр Zimbra</span>
+      <code>{{ selected_run.search_query }}</code>
+      {% if selected_run.search_cutoff_date %}
+      <small>Граничная дата: письма раньше {{ selected_run.search_cutoff_date.strftime('%d.%m.%Y') }}.</small>
+      {% endif %}
+    </div>
+    {% endif %}
     <div class="cleanup-summary-grid">
       <div><span>Проверено ящиков</span><strong>{{ selected_run.checked_mailboxes }}</strong></div>
       <div><span>Есть совпадения</span><strong>{{ selected_run.matched_mailboxes }}</strong></div>
-      <div><span>Найдено сообщений</span><strong>{{ selected_run.found_messages }}</strong></div>
-      <div class="good"><span>Удалено</span><strong>{{ selected_run.deleted_messages }}</strong></div>
+      <div><span>{{ 'Под удаление' if selected_run.mode == 'dry_run' else 'Найдено перед удалением' }}</span><strong>{{ selected_run.found_messages }}</strong></div>
+      {% if selected_run.mode != 'dry_run' %}
+      <div class="good"><span>Команда удаления выполнена</span><strong>{{ selected_run.deleted_messages }}</strong></div>
+      {% if selected_run.search_query %}
+      <div class="{{ 'good' if selected_run.remaining_messages == 0 else 'warn' }}"><span>Осталось после контроля</span><strong>{{ selected_run.remaining_messages }}</strong></div>
+      {% else %}
+      <div class="warn"><span>Контроль после удаления</span><strong>Не выполнялся</strong></div>
+      {% endif %}
+      {% endif %}
       <div class="warn">
         <span>{{ 'Показано не всё, ящиков' if selected_run.mode == 'dry_run' else 'Остались сообщения, ящиков' }}</span>
         <strong>{{ selected_run.truncated_mailboxes }}</strong>
@@ -380,23 +412,27 @@
     {% endif %}
     <div class="table-wrap">
       <table class="journal-table">
-        <thead><tr><th>Почтовый ящик</th><th>Найдено</th><th>Удалено</th><th>Время</th><th>Результат</th></tr></thead>
+        <thead><tr><th>Почтовый ящик</th><th>{{ 'Под удаление' if selected_run.mode == 'dry_run' else 'Найдено перед удалением' }}</th><th>Команда удаления</th><th>Осталось после контроля</th><th>Время</th><th>Результат</th></tr></thead>
         <tbody>
           {% for detail in selected_run_details %}
           <tr>
             <td>{{ detail.mailbox }}</td>
             <td>{{ detail.found }}</td>
             <td>{{ detail.deleted }}</td>
+            <td>{{ detail.get('remaining', 0) }}</td>
             <td>{{ detail.duration_ms|duration_ms }}</td>
             <td>
               {% if detail.error %}<span class="journal-error">{{ detail.error }}</span>
               {% elif detail.truncated %}
                 <span class="muted">{{ 'Найдено больше лимита проверки' if selected_run.mode == 'dry_run' else 'После запуска остались подходящие письма' }}</span>
-              {% else %}Готово{% endif %}
+              {% elif selected_run.mode == 'dry_run' %}Проверено
+              {% elif not selected_run.search_query %}Контроль после удаления не выполнялся
+              {% elif detail.get('remaining', 0) == 0 %}Удаление подтверждено контрольным поиском
+              {% else %}Нужна повторная проверка{% endif %}
             </td>
           </tr>
           {% else %}
-          <tr><td colspan="5" class="muted">Совпадений и ошибок нет.</td></tr>
+          <tr><td colspan="6" class="muted">Совпадений и ошибок нет.</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -408,7 +444,7 @@
     <div class="observer-card-heading"><div><h2>Журнал запусков</h2><p class="muted">Содержимое и темы писем не сохраняются.</p></div></div>
     <div class="table-wrap">
       <table class="journal-table">
-        <thead><tr><th>Дата</th><th>Правило</th><th>Режим</th><th>Ящиков</th><th>Найдено</th><th>Удалено</th><th>Ошибки</th><th>Статус</th><th></th></tr></thead>
+        <thead><tr><th>Дата</th><th>Правило</th><th>Режим</th><th>Ящиков</th><th>Найдено</th><th>Команда удаления</th><th>Осталось</th><th>Ошибки</th><th>Статус</th><th></th></tr></thead>
         <tbody>
           {% for run in runs %}
           <tr>
@@ -418,12 +454,13 @@
             <td>{{ run.checked_mailboxes }}</td>
             <td>{{ run.found_messages }}</td>
             <td>{{ run.deleted_messages }}</td>
+            <td>{{ run.remaining_messages if run.mode != 'dry_run' and run.search_query else '—' }}</td>
             <td>{{ run.error_count }}</td>
             <td>{{ status_labels.get(run.status, run.status) }}</td>
             <td><a class="button small secondary" href="/settings/zimbra-mail-cleanup?run_id={{ run.id }}#run-result">Открыть</a></td>
           </tr>
           {% else %}
-          <tr><td colspan="9" class="muted">Запусков пока нет.</td></tr>
+          <tr><td colspan="10" class="muted">Запусков пока нет.</td></tr>
           {% endfor %}
         </tbody>
       </table>

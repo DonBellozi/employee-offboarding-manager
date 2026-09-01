@@ -32,11 +32,54 @@
     parent.appendChild(element);
   };
 
-  const renderRuns = (runs) => {
+  const ruleCountLabel = (count) => {
+    const lastTwo = count % 100;
+    const last = count % 10;
+    if (lastTwo >= 11 && lastTwo <= 14) return `${count} правил`;
+    if (last === 1) return `${count} правило`;
+    if (last >= 2 && last <= 4) return `${count} правила`;
+    return `${count} правил`;
+  };
+
+  const renderRuns = (summary, runs) => {
     runList.replaceChildren();
+
+    const overall = document.createElement("article");
+    overall.className = "cleanup-progress-run cleanup-progress-overall";
+
+    const overallCaption = document.createElement("div");
+    overallCaption.className = "cleanup-progress-caption";
+    addText(overallCaption, "strong", "Общий проход по почтовым ящикам");
+    addText(overallCaption, "span", ruleCountLabel(runs.length));
+    overall.appendChild(overallCaption);
+
+    const progress = document.createElement("progress");
+    progress.max = summary.total_mailboxes > 0 ? summary.total_mailboxes : 1;
+    progress.value = Math.min(summary.processed_mailboxes, progress.max);
+    overall.appendChild(progress);
+
+    const overallMeta = document.createElement("div");
+    overallMeta.className = "cleanup-progress-meta";
+    addText(
+      overallMeta,
+      "span",
+      summary.total_mailboxes > 0
+        ? `Проверено ${summary.processed_mailboxes} из ${summary.total_mailboxes}`
+        : "Подготовка списка ящиков…"
+    );
+    addText(
+      overallMeta,
+      "span",
+      "Один проход по ящикам для всех правил"
+    );
+    overall.appendChild(overallMeta);
+    runList.appendChild(overall);
+
+    const ruleStats = document.createElement("div");
+    ruleStats.className = "cleanup-progress-rule-stats";
     runs.forEach((run) => {
       const article = document.createElement("article");
-      article.className = "cleanup-progress-run";
+      article.className = "cleanup-progress-rule-stat";
 
       const caption = document.createElement("div");
       caption.className = "cleanup-progress-caption";
@@ -44,28 +87,15 @@
       addText(caption, "span", `${run.mode_label} · ${run.status_label}`);
       article.appendChild(caption);
 
-      const progress = document.createElement("progress");
-      progress.max = run.total_mailboxes > 0 ? run.total_mailboxes : 1;
-      progress.value = Math.min(run.processed_mailboxes, progress.max);
-      article.appendChild(progress);
-
-      const meta = document.createElement("div");
-      meta.className = "cleanup-progress-meta";
-      addText(
-        meta,
-        "span",
-        run.total_mailboxes > 0
-          ? `Проверено ${run.processed_mailboxes} из ${run.total_mailboxes}`
-          : "Подготовка списка ящиков…"
-      );
-      addText(
-        meta,
-        "span",
-        `Найдено: ${run.found_messages} · Удалено: ${run.deleted_messages} · Ошибок: ${run.error_count}`
-      );
-      article.appendChild(meta);
-      runList.appendChild(article);
+      const values = document.createElement("span");
+      values.className = "cleanup-progress-rule-values";
+      values.textContent = run.mode === "dry_run"
+        ? `Под удаление: ${run.found_messages} · Ошибок: ${run.error_count}`
+        : `Найдено: ${run.found_messages} · Команда удаления: ${run.deleted_messages} · Осталось: ${run.remaining_messages} · Ошибок: ${run.error_count}`;
+      article.appendChild(values);
+      ruleStats.appendChild(article);
     });
+    runList.appendChild(ruleStats);
   };
 
   const renderScheduler = (scheduler) => {
@@ -120,7 +150,7 @@
         const cleanupRuns = data.runs.some((run) => run.mode !== "dry_run");
         title.textContent = cleanupRuns ? "Очистка выполняется" : "Проверка выполняется";
         note.textContent = "Страница обновляет состояние автоматически.";
-        renderRuns(data.runs);
+        renderRuns(data.summary, data.runs);
         setButtonsDisabled(true);
         return;
       }

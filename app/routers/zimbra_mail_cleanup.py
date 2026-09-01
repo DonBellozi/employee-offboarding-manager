@@ -36,7 +36,7 @@ STATUS_LABELS = {
     "queued": "В очереди",
     "running": "Выполняется",
     "success": "Успешно",
-    "warning": "Достигнут лимит",
+    "warning": "Требует внимания",
     "partial": "Частично",
     "skipped": "Нет включённых правил",
     "failed": "Ошибка",
@@ -65,6 +65,29 @@ def _format_scheduler_datetime(value, timezone_name: str) -> str:
     return normalized.astimezone(ZoneInfo(timezone_name)).strftime(
         "%d.%m.%Y %H:%M"
     )
+
+
+def _active_progress(runs) -> dict[str, int]:
+    return {
+        "processed_mailboxes": max(
+            (
+                int(run.batch_processed_mailboxes or run.processed_mailboxes or 0)
+                for run in runs
+            ),
+            default=0,
+        ),
+        "total_mailboxes": max(
+            (
+                int(run.batch_checked_mailboxes or run.checked_mailboxes or 0)
+                for run in runs
+            ),
+            default=0,
+        ),
+        "found_messages": sum(int(run.found_messages or 0) for run in runs),
+        "deleted_messages": sum(int(run.deleted_messages or 0) for run in runs),
+        "remaining_messages": sum(int(run.remaining_messages or 0) for run in runs),
+        "error_count": sum(int(run.error_count or 0) for run in runs),
+    }
 
 
 def _redirect(
@@ -182,6 +205,7 @@ def _context(
         "selected_run_can_cleanup": selected_run_can_cleanup,
         "runs": service.recent_runs(limit=30),
         "active_runs": active_runs,
+        "active_progress": _active_progress(active_runs),
         "weekday_labels": WEEKDAY_LABELS,
         "mode_labels": MODE_LABELS,
         "status_labels": STATUS_LABELS,
@@ -233,6 +257,7 @@ def cleanup_progress(
     cleanup = service.settings_view()
     return {
         "active": bool(runs),
+        "summary": _active_progress(runs),
         "runs": [
             {
                 "id": run.id,
@@ -246,7 +271,14 @@ def cleanup_progress(
                 "matched_mailboxes": int(run.matched_mailboxes or 0),
                 "found_messages": int(run.found_messages or 0),
                 "deleted_messages": int(run.deleted_messages or 0),
+                "remaining_messages": int(run.remaining_messages or 0),
                 "error_count": int(run.error_count or 0),
+                "search_query": run.search_query,
+                "search_cutoff_date": (
+                    run.search_cutoff_date.isoformat()
+                    if run.search_cutoff_date
+                    else ""
+                ),
                 "duration": format_duration_ms(run.duration_ms),
             }
             for run in runs

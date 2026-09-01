@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -91,14 +91,19 @@ class ZimbraMailCleanupRun(Base):
     source_preview_run_id: Mapped[int] = mapped_column(Integer, default=0)
     checked_mailboxes: Mapped[int] = mapped_column(Integer, default=0)
     processed_mailboxes: Mapped[int] = mapped_column(Integer, default=0)
+    batch_checked_mailboxes: Mapped[int] = mapped_column(Integer, default=0)
+    batch_processed_mailboxes: Mapped[int] = mapped_column(Integer, default=0)
     matched_mailboxes: Mapped[int] = mapped_column(Integer, default=0)
     found_messages: Mapped[int] = mapped_column(Integer, default=0)
     deleted_messages: Mapped[int] = mapped_column(Integer, default=0)
+    remaining_messages: Mapped[int] = mapped_column(Integer, default=0)
     truncated_mailboxes: Mapped[int] = mapped_column(Integer, default=0)
     error_count: Mapped[int] = mapped_column(Integer, default=0)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     details_json: Mapped[str] = mapped_column(Text, default="[]")
     rule_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    search_query: Mapped[str] = mapped_column(Text, default="")
+    search_cutoff_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     error_message: Mapped[str] = mapped_column(Text, default="")
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True
