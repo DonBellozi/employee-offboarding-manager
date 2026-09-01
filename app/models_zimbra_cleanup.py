@@ -79,6 +79,7 @@ class ZimbraMailCleanupRun(Base):
     initiated_by: Mapped[str] = mapped_column(String(256), default="")
     source_preview_run_id: Mapped[int] = mapped_column(Integer, default=0)
     checked_mailboxes: Mapped[int] = mapped_column(Integer, default=0)
+    processed_mailboxes: Mapped[int] = mapped_column(Integer, default=0)
     matched_mailboxes: Mapped[int] = mapped_column(Integer, default=0)
     found_messages: Mapped[int] = mapped_column(Integer, default=0)
     deleted_messages: Mapped[int] = mapped_column(Integer, default=0)
@@ -92,5 +93,8 @@ class ZimbraMailCleanupRun(Base):
         DateTime(timezone=True), default=utcnow, index=True
     )
     completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    progress_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

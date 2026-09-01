@@ -29,6 +29,8 @@ SCHEDULE_MODES = {"manual", "weekly"}
 PREVIEW_MAX_AGE_HOURS = 24
 SEARCH_LIMIT = 1000
 MAX_DELETE_PASSES = 10
+ACTIVE_RUN_STATUSES = {"queued", "running"}
+SCHEDULE_FAILURE_RETRY_MINUTES = 10
 SUMMARY_RE = re.compile(
     r"num:\s*(\d+)\s*,\s*more:\s*(true|false)",
     re.IGNORECASE,
@@ -621,20 +623,208 @@ class ZimbraMailCleanupService:
         trigger: str,
         actor: str,
         preview_run_id: int = 0,
+        status: str = "running",
     ) -> ZimbraMailCleanupRun:
+        now = utcnow()
         row = ZimbraMailCleanupRun(
             rule_id=int(rule.id),
             rule_name=rule.name,
             mode=mode,
             trigger=trigger,
-            status="running",
+            status=status,
             initiated_by=str(actor or "")[:256],
             source_preview_run_id=int(preview_run_id or 0),
             rule_snapshot_json=self._snapshot_json(rule),
+            started_at=now,
+            progress_at=now,
         )
         self.db.add(row)
         self.db.flush()
         return row
+
+    def active_runs(self) -> list[ZimbraMailCleanupRun]:
+        return list(
+            self.db.scalars(
+                select(ZimbraMailCleanupRun)
+                .where(ZimbraMailCleanupRun.status.in_(ACTIVE_RUN_STATUSES))
+                .order_by(
+                    ZimbraMailCleanupRun.started_at,
+                    ZimbraMailCleanupRun.id,
+                )
+            ).all()
+        )
+
+    def _ensure_no_active_runs(self) -> None:
+        if self.active_runs():
+            raise RuntimeError("Проверка или очистка почты Zimbra уже выполняется")
+
+    def _prepare_runs(
+        self,
+        rules: list[ZimbraMailRetentionRule],
+        *,
+        mode: str,
+        trigger: str,
+        actor: str,
+        preview_run_id: int = 0,
+    ) -> list[ZimbraMailCleanupRun]:
+        if not rules:
+            return []
+        if mode != "dry_run" and self.settings.dry_run:
+            raise RuntimeError("Глобальный DRY_RUN запрещает удаление сообщений")
+        self._ensure_no_active_runs()
+        rows = [
+            self._create_run(
+                rule,
+                mode=mode,
+                trigger=trigger,
+                actor=actor,
+                preview_run_id=preview_run_id,
+                status="queued",
+            )
+            for rule in rules
+        ]
+        self.db.commit()
+        for row in rows:
+            self.db.refresh(row)
+        return rows
+
+    def prepare_dry_run(
+        self,
+        rule_id: int,
+        *,
+        actor: str,
+    ) -> ZimbraMailCleanupRun:
+        return self._prepare_runs(
+            [self.get_rule(rule_id)],
+            mode="dry_run",
+            trigger="manual",
+            actor=actor,
+        )[0]
+
+    def prepare_dry_run_unverified(
+        self,
+        *,
+        actor: str,
+    ) -> list[ZimbraMailCleanupRun]:
+        rules = self.unverified_rules()
+        if not rules:
+            raise ValueError("Новых или изменённых правил для проверки нет")
+        return self._prepare_runs(
+            rules,
+            mode="dry_run",
+            trigger="manual_batch",
+            actor=actor,
+        )
+
+    def _validated_preview(
+        self,
+        rule: ZimbraMailRetentionRule,
+        preview_run_id: int,
+    ) -> ZimbraMailCleanupRun:
+        preview = self.db.get(ZimbraMailCleanupRun, int(preview_run_id))
+        if (
+            preview is None
+            or preview.rule_id != rule.id
+            or preview.mode != "dry_run"
+            or preview.status not in {"success", "warning"}
+            or preview.rule_snapshot_json != self._snapshot_json(rule)
+            or not self.preview_is_fresh(preview)
+        ):
+            raise ValueError(
+                "Перед очисткой выполните свежую проверку неизмененного правила"
+            )
+        if preview.found_messages <= 0:
+            raise ValueError("По последней проверке сообщений для удаления нет")
+        return preview
+
+    def prepare_manual_cleanup(
+        self,
+        rule_id: int,
+        *,
+        preview_run_id: int,
+        actor: str,
+    ) -> ZimbraMailCleanupRun:
+        rule = self.get_rule(rule_id)
+        preview = self._validated_preview(rule, preview_run_id)
+        return self._prepare_runs(
+            [rule],
+            mode="manual_cleanup",
+            trigger="manual",
+            actor=actor,
+            preview_run_id=preview.id,
+        )[0]
+
+    def _mark_prepared_runs_failed(
+        self,
+        runs: list[ZimbraMailCleanupRun],
+        error: Exception,
+    ) -> None:
+        completed_at = utcnow()
+        message = str(error)[:4000]
+        for run in runs:
+            if run.status not in ACTIVE_RUN_STATUSES:
+                continue
+            run.status = "failed"
+            run.error_count = max(1, int(run.error_count or 0))
+            run.error_message = message
+            run.completed_at = completed_at
+            run.progress_at = completed_at
+        self.db.commit()
+
+    def execute_prepared_runs(
+        self,
+        run_ids: list[int],
+    ) -> list[ZimbraMailCleanupRun]:
+        normalized_ids = list(dict.fromkeys(int(value) for value in run_ids))
+        runs = [
+            run
+            for run_id in normalized_ids
+            if (run := self.db.get(ZimbraMailCleanupRun, run_id)) is not None
+        ]
+        if len(runs) != len(normalized_ids) or not runs:
+            raise ValueError("Не удалось найти подготовленный запуск")
+        if any(run.status != "queued" for run in runs):
+            raise ValueError("Подготовленный запуск уже был обработан")
+        mode = runs[0].mode
+        trigger = runs[0].trigger
+        if any(run.mode != mode or run.trigger != trigger for run in runs):
+            error = ValueError("В очередь попали несовместимые запуски")
+            self._mark_prepared_runs_failed(runs, error)
+            raise error
+        rules: list[ZimbraMailRetentionRule] = []
+        try:
+            for run in runs:
+                rule = self.get_rule(run.rule_id)
+                if run.rule_snapshot_json != self._snapshot_json(rule):
+                    raise ValueError(
+                        f"Правило «{run.rule_name}» изменилось после постановки в очередь"
+                    )
+                rules.append(rule)
+            return self._run_rules(
+                rules,
+                mode=mode,
+                trigger=trigger,
+                actor=runs[0].initiated_by,
+                preview_run_id=runs[0].source_preview_run_id,
+                prepared_run_ids={run.rule_id: run.id for run in runs},
+            )
+        except Exception as exc:
+            self.db.rollback()
+            refreshed = [
+                run
+                for run_id in normalized_ids
+                if (run := self.db.get(ZimbraMailCleanupRun, run_id)) is not None
+            ]
+            self._mark_prepared_runs_failed(refreshed, exc)
+            raise
+
+    def recover_interrupted_runs(self) -> int:
+        runs = self.active_runs()
+        if not runs:
+            return 0
+        error = RuntimeError("Запуск прерван перезапуском приложения")
+        self._mark_prepared_runs_failed(runs, error)
+        return len(runs)
 
     def _finish_runs(
         self,
@@ -658,6 +848,7 @@ class ZimbraMailCleanupService:
             truncated = [item for item in rule_results if item.truncated]
             matched = [item for item in rule_results if item.found > 0]
             run.checked_mailboxes = applicable_counts.get(int(rule.id), 0)
+            run.processed_mailboxes = run.checked_mailboxes
             run.matched_mailboxes = len(matched)
             run.found_messages = sum(item.found for item in rule_results)
             run.deleted_messages = sum(item.deleted for item in rule_results)
@@ -703,6 +894,7 @@ class ZimbraMailCleanupService:
             else:
                 run.error_message = ""
             run.completed_at = completed_at
+            run.progress_at = completed_at
             rule.last_run_at = completed_at
             rule.last_run_status = run.status
             self._audit(
@@ -742,6 +934,7 @@ class ZimbraMailCleanupService:
             run.error_message = message
             run.duration_ms = int((time.monotonic() - started) * 1000)
             run.completed_at = completed_at
+            run.progress_at = completed_at
             rule.last_run_at = completed_at
             rule.last_run_status = "failed"
             self._audit(
@@ -761,6 +954,7 @@ class ZimbraMailCleanupService:
         trigger: str,
         actor: str,
         preview_run_id: int = 0,
+        prepared_run_ids: dict[int, int] | None = None,
     ) -> list[ZimbraMailCleanupRun]:
         if mode not in {"dry_run", "manual_cleanup", "automatic_cleanup"}:
             raise ValueError("Неизвестный режим очистки Zimbra")
@@ -769,20 +963,55 @@ class ZimbraMailCleanupService:
             raise RuntimeError("Глобальный DRY_RUN запрещает удаление сообщений")
         if not rules:
             return []
+        prepared_runs: dict[int, ZimbraMailCleanupRun] | None = None
+        if prepared_run_ids is not None:
+            prepared_runs = {
+                int(rule.id): self.db.get(
+                    ZimbraMailCleanupRun,
+                    int(prepared_run_ids[int(rule.id)]),
+                )
+                for rule in rules
+            }
+            if any(
+                run is None or run.status != "queued"
+                for run in prepared_runs.values()
+            ):
+                raise ValueError("Подготовленный запуск уже недоступен")
+        if prepared_run_ids is None:
+            self._ensure_no_active_runs()
         if not self._run_lock.acquire(blocking=False):
             raise RuntimeError("Проверка или очистка почты Zimbra уже выполняется")
 
         started = time.monotonic()
-        runs = {
-            int(rule.id): self._create_run(
-                rule,
-                mode=mode,
-                trigger=trigger,
-                actor=actor,
-                preview_run_id=preview_run_id,
-            )
-            for rule in rules
-        }
+        if prepared_run_ids is None:
+            runs = {
+                int(rule.id): self._create_run(
+                    rule,
+                    mode=mode,
+                    trigger=trigger,
+                    actor=actor,
+                    preview_run_id=preview_run_id,
+                )
+                for rule in rules
+            }
+        else:
+            runs = prepared_runs
+            now = utcnow()
+            for run in runs.values():
+                run.status = "running"
+                run.started_at = now
+                run.completed_at = None
+                run.progress_at = now
+                run.checked_mailboxes = 0
+                run.processed_mailboxes = 0
+                run.matched_mailboxes = 0
+                run.found_messages = 0
+                run.deleted_messages = 0
+                run.truncated_mailboxes = 0
+                run.error_count = 0
+                run.duration_ms = 0
+                run.details_json = "[]"
+                run.error_message = ""
         self.db.commit()
         try:
             zimbra = ZimbraService(self.settings)
@@ -809,6 +1038,12 @@ class ZimbraMailCleanupService:
                     )
                     for execution in executions
                 }
+                progress_at = utcnow()
+                for rule in rules:
+                    run = runs[int(rule.id)]
+                    run.checked_mailboxes = applicable_counts[int(rule.id)]
+                    run.progress_at = progress_at
+                self.db.commit()
                 results: list[MailboxResult] = []
                 workers = max(
                     1,
@@ -832,7 +1067,22 @@ class ZimbraMailCleanupService:
                         for mailbox, values in mailbox_executions.items()
                     ]
                     for future in as_completed(futures):
-                        results.extend(future.result())
+                        mailbox_results = future.result()
+                        results.extend(mailbox_results)
+                        progress_at = utcnow()
+                        for result in mailbox_results:
+                            run = runs[result.rule_id]
+                            run.processed_mailboxes += 1
+                            run.matched_mailboxes += int(result.found > 0)
+                            run.found_messages += result.found
+                            run.deleted_messages += result.deleted
+                            run.truncated_mailboxes += int(result.truncated)
+                            run.error_count += int(bool(result.error))
+                            run.duration_ms = int(
+                                (time.monotonic() - started) * 1000
+                            )
+                            run.progress_at = progress_at
+                        self.db.commit()
             return self._finish_runs(
                 rules,
                 runs,
@@ -890,20 +1140,7 @@ class ZimbraMailCleanupService:
         actor: str,
     ) -> ZimbraMailCleanupRun:
         rule = self.get_rule(rule_id)
-        preview = self.db.get(ZimbraMailCleanupRun, int(preview_run_id))
-        if (
-            preview is None
-            or preview.rule_id != rule.id
-            or preview.mode != "dry_run"
-            or preview.status not in {"success", "warning"}
-            or preview.rule_snapshot_json != self._snapshot_json(rule)
-            or not self.preview_is_fresh(preview)
-        ):
-            raise ValueError(
-                "Перед очисткой выполните свежую проверку неизмененного правила"
-            )
-        if preview.found_messages <= 0:
-            raise ValueError("По последней проверке сообщений для удаления нет")
+        preview = self._validated_preview(rule, preview_run_id)
         return self._run_rules(
             [rule],
             mode="manual_cleanup",
@@ -912,7 +1149,12 @@ class ZimbraMailCleanupService:
             preview_run_id=preview.id,
         )[0]
 
-    def scheduled_cleanup(self, *, actor: str = "system") -> list[ZimbraMailCleanupRun]:
+    def scheduled_cleanup(
+        self,
+        *,
+        actor: str = "system",
+        now: datetime | None = None,
+    ) -> list[ZimbraMailCleanupRun]:
         rules = list(
             self.db.scalars(
                 select(ZimbraMailRetentionRule)
@@ -924,6 +1166,31 @@ class ZimbraMailCleanupService:
                 .order_by(ZimbraMailRetentionRule.id)
             ).all()
         )
+        if not rules:
+            completed_at = as_utc(now) or utcnow()
+            run = ZimbraMailCleanupRun(
+                rule_id=0,
+                rule_name="Недельная очистка",
+                mode="automatic_cleanup",
+                trigger="scheduled",
+                status="skipped",
+                initiated_by=actor,
+                error_message="Нет включённых правил с автоочисткой",
+                started_at=completed_at,
+                completed_at=completed_at,
+                progress_at=completed_at,
+            )
+            self.db.add(run)
+            self.db.flush()
+            self._audit(
+                actor,
+                "zimbra_mail_cleanup_run_skipped",
+                f"run:{run.id}",
+                {"reason": "no_automatic_rules"},
+            )
+            self.db.commit()
+            self.db.refresh(run)
+            return [run]
         return self._run_rules(
             rules,
             mode="automatic_cleanup",
@@ -960,7 +1227,14 @@ class ZimbraMailCleanupService:
         if started is None:
             return True
         last_local = started.astimezone(tz)
-        return last_local.isocalendar()[:2] != current.isocalendar()[:2]
+        if last_local.isocalendar()[:2] != current.isocalendar()[:2]:
+            return True
+        if latest.status != "failed":
+            return False
+        finished = as_utc(latest.completed_at) or started
+        return (
+            current.astimezone(timezone.utc) - finished
+        ).total_seconds() >= SCHEDULE_FAILURE_RETRY_MINUTES * 60
 
     def run_weekly_if_due(
         self,
@@ -969,7 +1243,7 @@ class ZimbraMailCleanupService:
     ) -> list[ZimbraMailCleanupRun]:
         if not self.weekly_due(now=now):
             return []
-        return self.scheduled_cleanup(actor="system")
+        return self.scheduled_cleanup(actor="system", now=now)
 
     def recent_runs(self, *, limit: int = 30) -> list[ZimbraMailCleanupRun]:
         return list(

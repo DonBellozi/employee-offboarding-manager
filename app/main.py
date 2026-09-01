@@ -41,6 +41,8 @@ from app.services.synology_scheduler import SynologyLifecycleScheduler
 from app.services.telegram_worker import TelegramNotificationWorker
 from app.services.techexpert_lifecycle import TechExpertLifecycleWorker
 from app.services.zimbra_observer_scheduler import ZimbraObserverScheduler
+from app.services.zimbra_mail_cleanup import ZimbraMailCleanupService
+from app.services.zimbra_mail_cleanup_scheduler import ZimbraMailCleanupScheduler
 from app.services.zimbra_employment_lifecycle import (
     ZimbraEmploymentLifecycleWorker,
 )
@@ -61,6 +63,7 @@ async def lifespan(_: FastAPI):
         source_registry.ensure_primary()
         source_registry.apply_primary_to_settings()
         ensure_bootstrap_admin(db, settings)
+        ZimbraMailCleanupService(settings, db).recover_interrupted_runs()
 
     onec_scheduler = OneCAutoImportScheduler(settings, SessionLocal)
     blocking_worker = BlockingQueueWorker(settings, SessionLocal)
@@ -82,6 +85,10 @@ async def lifespan(_: FastAPI):
         SessionLocal,
     )
     zimbra_observer_scheduler = ZimbraObserverScheduler(settings, SessionLocal)
+    zimbra_mail_cleanup_scheduler = ZimbraMailCleanupScheduler(
+        settings,
+        SessionLocal,
+    )
     zimbra_employment_worker = ZimbraEmploymentLifecycleWorker(
         settings,
         SessionLocal,
@@ -95,6 +102,7 @@ async def lifespan(_: FastAPI):
     synology_scheduler.start()
     telegram_worker.start()
     zimbra_observer_scheduler.start()
+    zimbra_mail_cleanup_scheduler.start()
     zimbra_employment_worker.start()
     techexpert_worker.start()
     try:
@@ -102,6 +110,7 @@ async def lifespan(_: FastAPI):
     finally:
         techexpert_worker.stop()
         zimbra_employment_worker.stop()
+        zimbra_mail_cleanup_scheduler.stop()
         zimbra_observer_scheduler.stop()
         telegram_worker.stop()
         synology_scheduler.stop()

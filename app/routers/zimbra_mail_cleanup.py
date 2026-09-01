@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import logging
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.security import get_or_create_csrf, require_admin, validate_csrf
 from app.services.zimbra_mail_cleanup import (
     WEEKDAY_LABELS,
@@ -19,6 +20,7 @@ from app.time_utils import register_datetime_filters
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 templates = register_datetime_filters(Jinja2Templates(directory="app/templates"))
 templates.env.filters["duration_ms"] = format_duration_ms
 TRUTHY = {"1", "true", "yes", "on"}
@@ -29,10 +31,12 @@ MODE_LABELS = {
     "automatic_cleanup": "Недельная очистка",
 }
 STATUS_LABELS = {
+    "queued": "В очереди",
     "running": "Выполняется",
     "success": "Успешно",
     "warning": "Достигнут лимит",
     "partial": "Частично",
+    "skipped": "Нет включённых правил",
     "failed": "Ошибка",
 }
 CONDITION_LABELS = {"from": "От кого", "to": "Кому"}
@@ -66,6 +70,17 @@ def _redirect(
         f"/settings/zimbra-mail-cleanup{suffix}",
         status_code=303,
     )
+
+
+def _execute_prepared_cleanup(settings: Settings, run_ids: list[int]) -> None:
+    try:
+        with SessionLocal() as db:
+            ZimbraMailCleanupService(settings, db).execute_prepared_runs(run_ids)
+    except Exception:
+        logger.exception(
+            "Background Zimbra mail cleanup failed for runs %s",
+            run_ids,
+        )
 
 
 def _context(
@@ -130,6 +145,7 @@ def _context(
         == service._snapshot_json(selected_rule)
         and service.preview_is_fresh(selected_run)
     )
+    active_runs = service.active_runs()
     return {
         "user": current,
         "csrf": get_or_create_csrf(request),
@@ -145,6 +161,7 @@ def _context(
         "selected_run_details": service.run_details(selected_run),
         "selected_run_can_cleanup": selected_run_can_cleanup,
         "runs": service.recent_runs(limit=30),
+        "active_runs": active_runs,
         "weekday_labels": WEEKDAY_LABELS,
         "mode_labels": MODE_LABELS,
         "status_labels": STATUS_LABELS,
@@ -181,6 +198,37 @@ def cleanup_page(
             error=error,
         ),
     )
+
+
+@router.get("/settings/zimbra-mail-cleanup/progress")
+def cleanup_progress(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    require_admin(request)
+    runs = ZimbraMailCleanupService(settings, db).active_runs()
+    return {
+        "active": bool(runs),
+        "runs": [
+            {
+                "id": run.id,
+                "rule_name": run.rule_name,
+                "mode": run.mode,
+                "mode_label": MODE_LABELS.get(run.mode, run.mode),
+                "status": run.status,
+                "status_label": STATUS_LABELS.get(run.status, run.status),
+                "processed_mailboxes": int(run.processed_mailboxes or 0),
+                "total_mailboxes": int(run.checked_mailboxes or 0),
+                "matched_mailboxes": int(run.matched_mailboxes or 0),
+                "found_messages": int(run.found_messages or 0),
+                "deleted_messages": int(run.deleted_messages or 0),
+                "error_count": int(run.error_count or 0),
+                "duration": format_duration_ms(run.duration_ms),
+            }
+            for run in runs
+        ],
+    }
 
 
 @router.post("/settings/zimbra-mail-cleanup/schedule")
@@ -261,6 +309,7 @@ def cleanup_rule_save(
 def cleanup_rule_check(
     rule_id: int,
     request: Request,
+    background_tasks: BackgroundTasks,
     csrf: str = Form(...),
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
@@ -268,15 +317,17 @@ def cleanup_rule_check(
     validate_csrf(request, csrf)
     current = require_admin(request)
     try:
-        run = ZimbraMailCleanupService(settings, db).dry_run(
+        run = ZimbraMailCleanupService(settings, db).prepare_dry_run(
             rule_id,
             actor=current.username,
         )
+        background_tasks.add_task(
+            _execute_prepared_cleanup,
+            settings,
+            [run.id],
+        )
         return _redirect(
-            message=(
-                f"Проверка завершена: найдено {run.found_messages}, "
-                f"ошибок {run.error_count}"
-            ),
+            message="Проверка поставлена в очередь",
             run_id=run.id,
         )
     except Exception as exc:
@@ -287,6 +338,7 @@ def cleanup_rule_check(
 @router.post("/settings/zimbra-mail-cleanup/rules/check-unverified")
 def cleanup_rules_check_unverified(
     request: Request,
+    background_tasks: BackgroundTasks,
     csrf: str = Form(...),
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
@@ -294,14 +346,19 @@ def cleanup_rules_check_unverified(
     validate_csrf(request, csrf)
     current = require_admin(request)
     try:
-        runs = ZimbraMailCleanupService(settings, db).dry_run_unverified(
+        runs = ZimbraMailCleanupService(
+            settings,
+            db,
+        ).prepare_dry_run_unverified(
             actor=current.username,
         )
+        background_tasks.add_task(
+            _execute_prepared_cleanup,
+            settings,
+            [run.id for run in runs],
+        )
         return _redirect(
-            message=(
-                f"Проверено новых и изменённых правил: {len(runs)}. "
-                f"Найдено сообщений: {sum(run.found_messages for run in runs)}"
-            ),
+            message=f"Правил поставлено на проверку: {len(runs)}",
             run_ids=[run.id for run in runs],
         )
     except Exception as exc:
@@ -343,6 +400,7 @@ def cleanup_rule_state(
 def cleanup_rule_execute(
     rule_id: int,
     request: Request,
+    background_tasks: BackgroundTasks,
     csrf: str = Form(...),
     preview_run_id: int = Form(...),
     settings: Settings = Depends(get_settings),
@@ -351,16 +409,18 @@ def cleanup_rule_execute(
     validate_csrf(request, csrf)
     current = require_admin(request)
     try:
-        run = ZimbraMailCleanupService(settings, db).manual_cleanup(
+        run = ZimbraMailCleanupService(settings, db).prepare_manual_cleanup(
             rule_id,
             preview_run_id=preview_run_id,
             actor=current.username,
         )
+        background_tasks.add_task(
+            _execute_prepared_cleanup,
+            settings,
+            [run.id],
+        )
         return _redirect(
-            message=(
-                f"Очистка завершена: удалено {run.deleted_messages}, "
-                f"ошибок {run.error_count}"
-            ),
+            message="Очистка поставлена в очередь",
             run_id=run.id,
         )
     except Exception as exc:

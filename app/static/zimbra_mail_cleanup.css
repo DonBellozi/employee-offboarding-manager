@@ -22,6 +22,37 @@
   background: #f8fafc;
 }
 .cleanup-worker-note strong { font-size: 1.35rem; }
+.cleanup-live-progress {
+  border-color: #bfdbfe;
+  background: linear-gradient(135deg, #eff6ff 0%, #fff 72%);
+}
+.cleanup-live-heading { display: flex; align-items: center; gap: 12px; }
+.cleanup-live-heading h2 { margin: 0 0 3px; }
+.cleanup-live-heading p { margin: 0; }
+.cleanup-spinner {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  border: 3px solid #bfdbfe;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: cleanup-spin .8s linear infinite;
+}
+.cleanup-progress-runs { display: grid; gap: 10px; margin-top: 14px; }
+.cleanup-progress-run {
+  display: grid;
+  gap: 8px;
+  padding: 11px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .82);
+}
+.cleanup-progress-caption,
+.cleanup-progress-meta { display: flex; justify-content: space-between; gap: 12px; }
+.cleanup-progress-caption span,
+.cleanup-progress-meta { color: #64748b; font-size: .84rem; }
+.cleanup-progress-run progress { width: 100%; height: 9px; accent-color: #2563eb; }
+@keyframes cleanup-spin { to { transform: rotate(360deg); } }
 .cleanup-rules-heading-actions,
 .cleanup-action-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .cleanup-rules-heading-actions form,
@@ -75,4 +106,6 @@
   .cleanup-summary-grid { grid-template-columns: 1fr; }
   .cleanup-mailboxes { grid-column: auto; }
   .cleanup-execute-form { align-items: stretch; flex-direction: column; }
+  .cleanup-progress-caption,
+  .cleanup-progress-meta { align-items: flex-start; flex-direction: column; gap: 4px; }
 }

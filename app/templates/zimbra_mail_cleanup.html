@@ -25,6 +25,39 @@
   </div>
   {% endif %}
 
+  <section class="card cleanup-live-progress"
+           id="cleanup-live-progress"
+           data-progress-url="/settings/zimbra-mail-cleanup/progress"
+           data-active="{{ 'true' if active_runs else 'false' }}"
+           aria-live="polite"
+           {% if not active_runs %}hidden{% endif %}>
+    <div class="cleanup-live-heading">
+      <span class="cleanup-spinner" aria-hidden="true"></span>
+      <div>
+        <h2 data-cleanup-progress-title>
+          {% if active_runs and active_runs|selectattr('mode', 'ne', 'dry_run')|list %}Очистка выполняется{% else %}Проверка выполняется{% endif %}
+        </h2>
+        <p class="muted" data-cleanup-progress-note>Страница обновляет состояние автоматически.</p>
+      </div>
+    </div>
+    <div class="cleanup-progress-runs" data-cleanup-progress-runs>
+      {% for run in active_runs %}
+      <article class="cleanup-progress-run">
+        <div class="cleanup-progress-caption">
+          <strong>{{ run.rule_name }}</strong>
+          <span>{{ mode_labels.get(run.mode, run.mode) }} · {{ status_labels.get(run.status, run.status) }}</span>
+        </div>
+        <progress max="{{ run.checked_mailboxes if run.checked_mailboxes else 1 }}"
+                  value="{{ run.processed_mailboxes }}"></progress>
+        <div class="cleanup-progress-meta">
+          <span>{% if run.checked_mailboxes %}Проверено {{ run.processed_mailboxes }} из {{ run.checked_mailboxes }}{% else %}Подготовка списка ящиков…{% endif %}</span>
+          <span>Найдено: {{ run.found_messages }} · Удалено: {{ run.deleted_messages }} · Ошибок: {{ run.error_count }}</span>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+
   <section class="card cleanup-safety-card">
     <strong>Безопасный порядок работы</strong>
     <ol>
@@ -145,9 +178,9 @@
       </div>
       <div class="cleanup-rules-heading-actions">
         {% if unverified_count >= 2 %}
-        <form method="post" action="/settings/zimbra-mail-cleanup/rules/check-unverified">
+        <form method="post" action="/settings/zimbra-mail-cleanup/rules/check-unverified" data-cleanup-start>
           <input type="hidden" name="csrf" value="{{ csrf }}">
-          <button class="button" type="submit">Проверить новые и изменённые ({{ unverified_count }})</button>
+          <button class="button" type="submit"{% if active_runs %} disabled{% endif %}>Проверить новые и изменённые ({{ unverified_count }})</button>
         </form>
         {% endif %}
         <span class="integration-badge{% if rule_views %} active{% endif %}">{{ rule_views|length }}</span>
@@ -195,9 +228,9 @@
             <td>
               <div class="cleanup-actions">
                 <div class="cleanup-action-buttons">
-                  <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/check">
+                  <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/check" data-cleanup-start>
                     <input type="hidden" name="csrf" value="{{ csrf }}">
-                    <button class="button small secondary" type="submit">Проверить</button>
+                    <button class="button small secondary" type="submit"{% if active_runs %} disabled{% endif %}>Проверить</button>
                   </form>
                   <a class="button small secondary" href="/settings/zimbra-mail-cleanup?edit_id={{ rule.id }}#rule-editor">Изменить</a>
                   <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/delete" onsubmit="return confirm('Удалить это правило? Журнал запусков сохранится.');">
@@ -303,10 +336,11 @@
     <form method="post"
           action="/settings/zimbra-mail-cleanup/rules/{{ selected_run.rule_id }}/cleanup"
           class="cleanup-execute-form"
+          data-cleanup-start
           onsubmit="return confirm('Удалить найденные сообщения штатной командой Zimbra? Они будут удалены из пользовательских папок; Dumpster принудительно не очищается.');">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="preview_run_id" value="{{ selected_run.id }}">
-      <button class="button danger" type="submit"{% if global_dry_run %} disabled{% endif %}>Выполнить очистку по результату</button>
+      <button class="button danger" type="submit"{% if global_dry_run or active_runs %} disabled{% endif %}>Выполнить очистку по результату</button>
       <span class="muted">Перед удалением поиск будет выполнен повторно.</span>
     </form>
     {% endif %}

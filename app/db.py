@@ -125,6 +125,14 @@ def ensure_compatibility_schema() -> None:
                 "source_rule_id": "INTEGER NOT NULL DEFAULT 0",
             },
         )
+        add_missing_columns(
+            connection,
+            "zimbra_mail_cleanup_runs",
+            {
+                "processed_mailboxes": "INTEGER NOT NULL DEFAULT 0",
+                "progress_at": "DATETIME",
+            },
+        )
 
         if "hr_source_records" in tables:
             add_missing_columns(
