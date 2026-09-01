@@ -37,7 +37,11 @@ class ZimbraService:
     # одинаковых JVM-процессов zmprov подряд.
     _CACHE_TTL_SECONDS = 45.0
     _cache_lock = threading.Lock()
+    # Полные серверные обходы (`gaa -v`) сериализуются отдельно от быстрых
+    # проверок логинов в интерфейсе регистрации. Долгая служебная операция не
+    # должна делать форму создания учетной записи неработоспособной.
     _query_lock = threading.Lock()
+    _login_query_lock = threading.Lock()
     _background_state_lock = threading.Lock()
     _background_cancel_event: threading.Event | None = None
     _login_cache: dict[
@@ -953,13 +957,14 @@ class ZimbraService:
                 # ожидает завершения полного списка альтернатив.
                 return execute_query()
 
-            # Обычные параллельные запросы по-прежнему объединяем одним lock.
-            while not self._query_lock.acquire(timeout=0.1):
+            # Фоновые проверки логинов объединяем между собой, но не ставим
+            # их в очередь за полным обходом ящиков или почтовой очисткой.
+            while not self._login_query_lock.acquire(timeout=0.1):
                 self._raise_if_cancelled(cancel_event)
             try:
                 return execute_query()
             finally:
-                self._query_lock.release()
+                self._login_query_lock.release()
         finally:
             if cancel_event is not None:
                 self.finish_background_check(cancel_event)

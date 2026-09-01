@@ -1132,82 +1132,87 @@ class ZimbraMailCleanupService:
         try:
             zimbra = ZimbraService(self.settings)
             executions = [self._execution(rule) for rule in rules]
+            # Полный cleanup может идти больше часа. Общий query-lock нужен
+            # только для тяжелого `gaa -v`, которым строится исходный список
+            # ящиков. Удерживать его на всех zmmailbox-командах нельзя: тогда
+            # интерфейс регистрации не может проверить свободный логин, а
+            # плановое наблюдение Zimbra ждет окончания всей очистки.
             with zimbra._query_lock:
                 mailboxes = zimbra.list_user_mailboxes()
-                mailbox_executions = {
-                    mailbox: [
-                        execution
-                        for execution in executions
-                        if self._applies(mailbox, execution)
-                    ]
-                    for mailbox in mailboxes
-                }
-                mailbox_executions = {
-                    mailbox: values
-                    for mailbox, values in mailbox_executions.items()
-                    if values
-                }
-                applicable_counts = {
-                    execution.id: sum(
-                        execution in values
-                        for values in mailbox_executions.values()
-                    )
+            mailbox_executions = {
+                mailbox: [
+                    execution
                     for execution in executions
-                }
-                progress_at = utcnow()
-                batch_mailbox_count = len(mailbox_executions)
-                for rule in rules:
-                    run = runs[int(rule.id)]
-                    run.checked_mailboxes = applicable_counts[int(rule.id)]
-                    run.batch_checked_mailboxes = batch_mailbox_count
-                    run.progress_at = progress_at
-                self.db.commit()
-                results: list[MailboxResult] = []
-                workers = max(
-                    1,
-                    min(
-                        int(self.settings.zimbra_mail_cleanup_workers),
-                        len(mailbox_executions) or 1,
-                    ),
+                    if self._applies(mailbox, execution)
+                ]
+                for mailbox in mailboxes
+            }
+            mailbox_executions = {
+                mailbox: values
+                for mailbox, values in mailbox_executions.items()
+                if values
+            }
+            applicable_counts = {
+                execution.id: sum(
+                    execution in values
+                    for values in mailbox_executions.values()
                 )
-                with ThreadPoolExecutor(
-                    max_workers=workers,
-                    thread_name_prefix="zimbra-mail-cleanup",
-                ) as pool:
-                    batch_processed_mailboxes = 0
-                    futures = [
-                        pool.submit(
-                            self._process_mailbox,
-                            zimbra,
-                            mailbox,
-                            values,
-                            delete=delete,
+                for execution in executions
+            }
+            progress_at = utcnow()
+            batch_mailbox_count = len(mailbox_executions)
+            for rule in rules:
+                run = runs[int(rule.id)]
+                run.checked_mailboxes = applicable_counts[int(rule.id)]
+                run.batch_checked_mailboxes = batch_mailbox_count
+                run.progress_at = progress_at
+            self.db.commit()
+            results: list[MailboxResult] = []
+            workers = max(
+                1,
+                min(
+                    int(self.settings.zimbra_mail_cleanup_workers),
+                    len(mailbox_executions) or 1,
+                ),
+            )
+            with ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="zimbra-mail-cleanup",
+            ) as pool:
+                batch_processed_mailboxes = 0
+                futures = [
+                    pool.submit(
+                        self._process_mailbox,
+                        zimbra,
+                        mailbox,
+                        values,
+                        delete=delete,
+                    )
+                    for mailbox, values in mailbox_executions.items()
+                ]
+                for future in as_completed(futures):
+                    mailbox_results = future.result()
+                    results.extend(mailbox_results)
+                    batch_processed_mailboxes += 1
+                    progress_at = utcnow()
+                    for run in runs.values():
+                        run.batch_processed_mailboxes = (
+                            batch_processed_mailboxes
                         )
-                        for mailbox, values in mailbox_executions.items()
-                    ]
-                    for future in as_completed(futures):
-                        mailbox_results = future.result()
-                        results.extend(mailbox_results)
-                        batch_processed_mailboxes += 1
-                        progress_at = utcnow()
-                        for run in runs.values():
-                            run.batch_processed_mailboxes = (
-                                batch_processed_mailboxes
-                            )
-                        for result in mailbox_results:
-                            run = runs[result.rule_id]
-                            run.processed_mailboxes += 1
-                            run.matched_mailboxes += int(result.found > 0)
-                            run.found_messages += result.found
-                            run.deleted_messages += result.deleted
-                            run.remaining_messages += result.remaining
-                            run.truncated_mailboxes += int(result.truncated)
-                            run.error_count += int(bool(result.error))
-                            run.duration_ms = int(
-                                (time.monotonic() - started) * 1000
-                            )
-                            run.progress_at = progress_at
-                        self.db.commit()
+                    for result in mailbox_results:
+                        run = runs[result.rule_id]
+                        run.processed_mailboxes += 1
+                        run.matched_mailboxes += int(result.found > 0)
+                        run.found_messages += result.found
+                        run.deleted_messages += result.deleted
+                        run.remaining_messages += result.remaining
+                        run.truncated_mailboxes += int(result.truncated)
+                        run.error_count += int(bool(result.error))
+                        run.duration_ms = int(
+                            (time.monotonic() - started) * 1000
+                        )
+                        run.progress_at = progress_at
+                    self.db.commit()
             return self._finish_runs(
                 rules,
                 runs,
