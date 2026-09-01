@@ -212,7 +212,7 @@
                     <input type="checkbox" name="enabled" value="on"
                            {% if rule.enabled %}checked{% endif %}
                            {% if not rule.enabled and not item.preview_fresh %}disabled{% else %}onchange="this.form.submit()"{% endif %}>
-                    <span>Правило включено</span>
+                    <span>Включено</span>
                   </label>
                 </form>
                 <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/state" class="cleanup-switch-form">
@@ -222,7 +222,7 @@
                     <input type="checkbox" name="automatic_cleanup" value="on"
                            {% if rule.automatic_cleanup %}checked{% endif %}
                            {% if rule.enabled %}onchange="this.form.submit()"{% else %}disabled{% endif %}>
-                    <span>Автоочистка раз в неделю</span>
+                    <span>Автоочистка</span>
                   </label>
                 </form>
                 {% if not rule.enabled and not item.preview_fresh %}<small class="muted">Перед включением нужна свежая проверка</small>{% endif %}
