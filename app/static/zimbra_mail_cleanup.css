@@ -22,10 +22,25 @@
   background: #f8fafc;
 }
 .cleanup-worker-note strong { font-size: 1.35rem; }
-.cleanup-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 250px; }
+.cleanup-rules-heading-actions,
+.cleanup-action-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.cleanup-rules-heading-actions form,
 .cleanup-actions form { margin: 0; }
-.cleanup-state-form { display: inline-flex; align-items: center; gap: 7px; }
-.cleanup-state-form label { white-space: nowrap; font-size: .85rem; color: #52627a; }
+.cleanup-actions { display: grid; gap: 10px; min-width: 280px; }
+.cleanup-rule-switches { display: grid; gap: 6px; }
+.cleanup-switch-form { display: block; }
+.cleanup-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #334155;
+  cursor: pointer;
+  font-size: .85rem;
+  white-space: nowrap;
+}
+.cleanup-switch input { accent-color: #2563eb; cursor: pointer; }
+.cleanup-switch.disabled { color: #94a3b8; cursor: not-allowed; }
+.cleanup-switch.disabled input { cursor: not-allowed; }
 .cleanup-summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(120px, 1fr));

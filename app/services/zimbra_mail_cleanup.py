@@ -61,6 +61,22 @@ def as_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
+def format_duration_ms(value: int | float | None) -> str:
+    """Показать длительность без неудобных тысяч секунд."""
+
+    milliseconds = max(0, int(value or 0))
+    if milliseconds < 10_000:
+        return f"{milliseconds / 1000:.1f}".replace(".", ",") + " сек."
+    total_seconds = int(round(milliseconds / 1000))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours} ч {minutes} мин {seconds} сек"
+    if minutes:
+        return f"{minutes} мин {seconds} сек"
+    return f"{seconds} сек"
+
+
 def normalize_email(value: str, *, field_name: str = "e-mail") -> str:
     try:
         return validate_email(
@@ -412,6 +428,11 @@ class ZimbraMailCleanupService:
             .limit(1)
         ).first()
 
+    def unverified_rules(self) -> list[ZimbraMailRetentionRule]:
+        """Новые/изменённые правила без dry-run текущей редакции."""
+
+        return [rule for rule in self.rules() if self.latest_preview(rule) is None]
+
     def preview_is_fresh(self, run: ZimbraMailCleanupRun | None) -> bool:
         completed = as_utc(run.completed_at) if run is not None else None
         return bool(
@@ -666,15 +687,21 @@ class ZimbraMailCleanupService:
                 run.status = "warning"
             else:
                 run.status = "success"
-            run.error_message = (
-                f"Ошибки в {len(errors)} ящиках"
-                if errors
-                else (
-                    f"Лимит поиска достигнут в {len(truncated)} ящиках"
-                    if truncated
-                    else ""
+            if errors:
+                run.error_message = f"Ошибки в {len(errors)} ящиках"
+            elif truncated and run.mode == "dry_run":
+                run.error_message = (
+                    f"В {len(truncated)} ящиках найдено больше "
+                    f"{SEARCH_LIMIT} сообщений. Показано не всё."
                 )
-            )
+            elif truncated:
+                run.error_message = (
+                    f"В {len(truncated)} ящиках после удаления "
+                    f"{SEARCH_LIMIT * MAX_DELETE_PASSES} сообщений остались "
+                    "подходящие письма. Повторите проверку и очистку."
+                )
+            else:
+                run.error_message = ""
             run.completed_at = completed_at
             rule.last_run_at = completed_at
             rule.last_run_status = run.status
@@ -839,6 +866,21 @@ class ZimbraMailCleanupService:
             trigger="manual",
             actor=actor,
         )[0]
+
+    def dry_run_unverified(
+        self,
+        *,
+        actor: str,
+    ) -> list[ZimbraMailCleanupRun]:
+        rules = self.unverified_rules()
+        if not rules:
+            raise ValueError("Новых или изменённых правил для проверки нет")
+        return self._run_rules(
+            rules,
+            mode="dry_run",
+            trigger="manual_batch",
+            actor=actor,
+        )
 
     def manual_cleanup(
         self,

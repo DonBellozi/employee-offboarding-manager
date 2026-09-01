@@ -143,7 +143,15 @@
         <h2>Правила</h2>
         <p class="muted">Проверка ничего не удаляет и формирует основание для ручной очистки.</p>
       </div>
-      <span class="integration-badge{% if rule_views %} active{% endif %}">{{ rule_views|length }}</span>
+      <div class="cleanup-rules-heading-actions">
+        {% if unverified_count >= 2 %}
+        <form method="post" action="/settings/zimbra-mail-cleanup/rules/check-unverified">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="button" type="submit">Проверить новые и изменённые ({{ unverified_count }})</button>
+        </form>
+        {% endif %}
+        <span class="integration-badge{% if rule_views %} active{% endif %}">{{ rule_views|length }}</span>
+      </div>
     </div>
     <div class="table-wrap">
       <table class="journal-table cleanup-rules-table">
@@ -186,36 +194,39 @@
             </td>
             <td>
               <div class="cleanup-actions">
-                <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/check">
+                <div class="cleanup-action-buttons">
+                  <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/check">
+                    <input type="hidden" name="csrf" value="{{ csrf }}">
+                    <button class="button small secondary" type="submit">Проверить</button>
+                  </form>
+                  <a class="button small secondary" href="/settings/zimbra-mail-cleanup?edit_id={{ rule.id }}#rule-editor">Изменить</a>
+                  <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/delete" onsubmit="return confirm('Удалить это правило? Журнал запусков сохранится.');">
+                    <input type="hidden" name="csrf" value="{{ csrf }}">
+                    <button class="button small danger" type="submit">Удалить</button>
+                  </form>
+                </div>
+                <div class="cleanup-rule-switches">
+                <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/state" class="cleanup-switch-form">
                   <input type="hidden" name="csrf" value="{{ csrf }}">
-                  <button class="button small secondary" type="submit">Проверить</button>
+                  <label class="cleanup-switch{% if not rule.enabled and not item.preview_fresh %} disabled{% endif %}">
+                    <input type="checkbox" name="enabled" value="on"
+                           {% if rule.enabled %}checked{% endif %}
+                           {% if not rule.enabled and not item.preview_fresh %}disabled{% else %}onchange="this.form.submit()"{% endif %}>
+                    <span>Правило включено</span>
+                  </label>
                 </form>
-                <a class="button small secondary" href="/settings/zimbra-mail-cleanup?edit_id={{ rule.id }}#rule-editor">Изменить</a>
-                {% if rule.enabled %}
-                <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/state" class="cleanup-state-form">
+                <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/state" class="cleanup-switch-form">
                   <input type="hidden" name="csrf" value="{{ csrf }}">
                   <input type="hidden" name="enabled" value="on">
-                  <label><input type="checkbox" name="automatic_cleanup" value="on"{% if rule.automatic_cleanup %} checked{% endif %}> Недельная</label>
-                  <button class="button small secondary" type="submit">Сохранить</button>
+                  <label class="cleanup-switch{% if not rule.enabled %} disabled{% endif %}">
+                    <input type="checkbox" name="automatic_cleanup" value="on"
+                           {% if rule.automatic_cleanup %}checked{% endif %}
+                           {% if rule.enabled %}onchange="this.form.submit()"{% else %}disabled{% endif %}>
+                    <span>Автоочистка раз в неделю</span>
+                  </label>
                 </form>
-                <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/state">
-                  <input type="hidden" name="csrf" value="{{ csrf }}">
-                  <button class="button small secondary" type="submit">Выключить</button>
-                </form>
-                {% elif item.preview_fresh %}
-                <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/state" class="cleanup-state-form">
-                  <input type="hidden" name="csrf" value="{{ csrf }}">
-                  <input type="hidden" name="enabled" value="on">
-                  <label><input type="checkbox" name="automatic_cleanup" value="on"> Недельная</label>
-                  <button class="button small" type="submit">Включить</button>
-                </form>
-                {% else %}
-                <span class="muted">Сначала проверить</span>
-                {% endif %}
-                <form method="post" action="/settings/zimbra-mail-cleanup/rules/{{ rule.id }}/delete" onsubmit="return confirm('Удалить это правило? Журнал запусков сохранится.');">
-                  <input type="hidden" name="csrf" value="{{ csrf }}">
-                  <button class="button small danger" type="submit">Удалить</button>
-                </form>
+                {% if not rule.enabled and not item.preview_fresh %}<small class="muted">Перед включением нужна свежая проверка</small>{% endif %}
+                </div>
               </div>
             </td>
           </tr>
@@ -226,6 +237,40 @@
       </table>
     </div>
   </section>
+
+  {% if batch_runs %}
+  <section class="card cleanup-result-card" id="batch-results">
+    <div class="observer-card-heading">
+      <div>
+        <h2>Пакетная проверка правил</h2>
+        <p class="muted">Каждое правило получило отдельный результат без удаления писем.</p>
+      </div>
+      <span class="integration-badge active">{{ batch_runs|length }}</span>
+    </div>
+    <div class="table-wrap">
+      <table class="journal-table">
+        <thead>
+          <tr><th>Правило</th><th>Ящиков</th><th>С совпадениями</th><th>Найдено</th><th>Сверх лимита</th><th>Ошибки</th><th>Время</th><th>Статус</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for run in batch_runs %}
+          <tr>
+            <td><strong>{{ run.rule_name }}</strong></td>
+            <td>{{ run.checked_mailboxes }}</td>
+            <td>{{ run.matched_mailboxes }}</td>
+            <td>{{ run.found_messages }}</td>
+            <td>{{ run.truncated_mailboxes }}</td>
+            <td>{{ run.error_count }}</td>
+            <td>{{ run.duration_ms|duration_ms }}</td>
+            <td>{{ status_labels.get(run.status, run.status) }}</td>
+            <td><a class="button small secondary" href="/settings/zimbra-mail-cleanup?run_id={{ run.id }}#run-result">Открыть</a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
 
   {% if selected_run %}
   <section class="card cleanup-result-card" id="run-result">
@@ -246,9 +291,12 @@
       <div><span>Есть совпадения</span><strong>{{ selected_run.matched_mailboxes }}</strong></div>
       <div><span>Найдено сообщений</span><strong>{{ selected_run.found_messages }}</strong></div>
       <div class="good"><span>Удалено</span><strong>{{ selected_run.deleted_messages }}</strong></div>
-      <div class="warn"><span>Достигнут лимит</span><strong>{{ selected_run.truncated_mailboxes }}</strong></div>
+      <div class="warn">
+        <span>{{ 'Показано не всё, ящиков' if selected_run.mode == 'dry_run' else 'Остались сообщения, ящиков' }}</span>
+        <strong>{{ selected_run.truncated_mailboxes }}</strong>
+      </div>
       <div class="bad"><span>Ошибок</span><strong>{{ selected_run.error_count }}</strong></div>
-      <div><span>Длительность</span><strong>{{ '%.1f'|format(selected_run.duration_ms / 1000) }} сек.</strong></div>
+      <div><span>Длительность</span><strong>{{ selected_run.duration_ms|duration_ms }}</strong></div>
     </div>
     {% if selected_run.error_message %}<div class="alert warning">{{ selected_run.error_message }}</div>{% endif %}
     {% if selected_run_can_cleanup %}
@@ -271,10 +319,11 @@
             <td>{{ detail.mailbox }}</td>
             <td>{{ detail.found }}</td>
             <td>{{ detail.deleted }}</td>
-            <td>{{ '%.1f'|format((detail.duration_ms or 0) / 1000) }} сек.</td>
+            <td>{{ detail.duration_ms|duration_ms }}</td>
             <td>
               {% if detail.error %}<span class="journal-error">{{ detail.error }}</span>
-              {% elif detail.truncated %}<span class="muted">Найдено не менее показанного количества</span>
+              {% elif detail.truncated %}
+                <span class="muted">{{ 'Найдено больше лимита проверки' if selected_run.mode == 'dry_run' else 'После запуска остались подходящие письма' }}</span>
               {% else %}Готово{% endif %}
             </td>
           </tr>

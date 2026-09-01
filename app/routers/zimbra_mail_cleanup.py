@@ -13,12 +13,14 @@ from app.security import get_or_create_csrf, require_admin, validate_csrf
 from app.services.zimbra_mail_cleanup import (
     WEEKDAY_LABELS,
     ZimbraMailCleanupService,
+    format_duration_ms,
 )
 from app.time_utils import register_datetime_filters
 
 
 router = APIRouter()
 templates = register_datetime_filters(Jinja2Templates(directory="app/templates"))
+templates.env.filters["duration_ms"] = format_duration_ms
 TRUTHY = {"1", "true", "yes", "on"}
 
 MODE_LABELS = {
@@ -29,7 +31,7 @@ MODE_LABELS = {
 STATUS_LABELS = {
     "running": "Выполняется",
     "success": "Успешно",
-    "warning": "Есть ограничение",
+    "warning": "Достигнут лимит",
     "partial": "Частично",
     "failed": "Ошибка",
 }
@@ -41,7 +43,13 @@ SCOPE_LABELS = {
 }
 
 
-def _redirect(*, message: str = "", error: str = "", run_id: int = 0):
+def _redirect(
+    *,
+    message: str = "",
+    error: str = "",
+    run_id: int = 0,
+    run_ids: list[int] | None = None,
+):
     query: list[str] = []
     if message:
         query.append(f"message={quote_plus(message)}")
@@ -49,6 +57,10 @@ def _redirect(*, message: str = "", error: str = "", run_id: int = 0):
         query.append(f"error={quote_plus(error)}")
     if run_id:
         query.append(f"run_id={int(run_id)}")
+    if run_ids:
+        query.append(
+            "run_ids=" + quote_plus(",".join(str(int(value)) for value in run_ids))
+        )
     suffix = "?" + "&".join(query) if query else ""
     return RedirectResponse(
         f"/settings/zimbra-mail-cleanup{suffix}",
@@ -63,6 +75,7 @@ def _context(
     db: Session,
     edit_id: int = 0,
     run_id: int = 0,
+    run_ids: str = "",
     message: str = "",
     error: str = "",
 ):
@@ -80,8 +93,25 @@ def _context(
                 "mailboxes": service.rule_mailboxes(rule),
                 "preview": preview,
                 "preview_fresh": service.preview_is_fresh(preview),
+                "needs_initial_check": preview is None,
             }
         )
+    unverified_count = sum(
+        1 for item in rule_views if item["needs_initial_check"]
+    )
+    batch_run_ids: list[int] = []
+    for raw_value in str(run_ids or "").split(","):
+        try:
+            value = int(raw_value.strip())
+        except ValueError:
+            continue
+        if value > 0 and value not in batch_run_ids:
+            batch_run_ids.append(value)
+    batch_runs = [
+        run
+        for value in batch_run_ids[:100]
+        if (run := service.get_run(value)) is not None
+    ]
     selected_rule = (
         next(
             (rule for rule in rules if rule.id == selected_run.rule_id),
@@ -105,6 +135,8 @@ def _context(
         "csrf": get_or_create_csrf(request),
         "cleanup": service.settings_view(),
         "rule_views": rule_views,
+        "unverified_count": unverified_count,
+        "batch_runs": batch_runs,
         "edit_rule": edit_rule,
         "edit_mailboxes": (
             "\n".join(service.rule_mailboxes(edit_rule)) if edit_rule else ""
@@ -129,6 +161,7 @@ def cleanup_page(
     request: Request,
     edit_id: int = 0,
     run_id: int = 0,
+    run_ids: str = "",
     message: str = "",
     error: str = "",
     settings: Settings = Depends(get_settings),
@@ -143,6 +176,7 @@ def cleanup_page(
             db=db,
             edit_id=edit_id,
             run_id=run_id,
+            run_ids=run_ids,
             message=message,
             error=error,
         ),
@@ -244,6 +278,31 @@ def cleanup_rule_check(
                 f"ошибок {run.error_count}"
             ),
             run_id=run.id,
+        )
+    except Exception as exc:
+        db.rollback()
+        return _redirect(error=str(exc))
+
+
+@router.post("/settings/zimbra-mail-cleanup/rules/check-unverified")
+def cleanup_rules_check_unverified(
+    request: Request,
+    csrf: str = Form(...),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf)
+    current = require_admin(request)
+    try:
+        runs = ZimbraMailCleanupService(settings, db).dry_run_unverified(
+            actor=current.username,
+        )
+        return _redirect(
+            message=(
+                f"Проверено новых и изменённых правил: {len(runs)}. "
+                f"Найдено сообщений: {sum(run.found_messages for run in runs)}"
+            ),
+            run_ids=[run.id for run in runs],
         )
     except Exception as exc:
         db.rollback()
