@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Управление жизненным циклом учетных записей{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
-  <link rel="stylesheet" href="/static/navigation.css">
+  <link rel="stylesheet" href="/static/navigation.css?v=c2b42d5d360e">
   {% if user %}
   <link rel="stylesheet" href="/static/zimbra_observer.css">
   <link rel="stylesheet" href="/static/zimbra_mail_cleanup.css">
@@ -15,7 +15,7 @@
   <script src="/static/zimbra_mail_cleanup.js" defer></script>
   <script src="/static/zimbra_mail_recall.js" defer></script>
   <script src="/static/workspace_modal.js" defer></script>
-  <script src="/static/server_clock.js" defer></script>
+  <script src="/static/server_clock.js?v=ced08aeabc99" defer></script>
   {% endif %}
   {% if user and user.role == 'admin' %}
   <link rel="stylesheet" href="/static/telegram_settings.css">
@@ -49,7 +49,7 @@
             <span class="server-clock-time" data-server-clock-time>{{ clock.time }}</span>
           </span>
           {% endif %}
-          {% if user.role == 'admin' and request.url.path == '/' %}
+          {% if user.role == 'admin' %}
           <a class="mail-recall-link"
              href="/zimbra-recall"
              title="Удаление ошибочно отправленного письма">Отзыв</a>
