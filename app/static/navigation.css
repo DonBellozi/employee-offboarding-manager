@@ -21,35 +21,48 @@
 
 /* Часы сервера: по ним считаются расписания и окно выгрузок после 19:00. */
 .server-clock {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 7px;
+  display: grid;
+  justify-items: center;
+  gap: 1px;
+  min-width: 104px;
   padding: 6px 11px;
   border: 1px solid rgba(255,255,255,.22);
   border-radius: 8px;
   background: rgba(255,255,255,.08);
   white-space: nowrap;
   cursor: default;
+  text-align: center;
 }
 
-.server-clock-label {
-  font-size: .72rem;
-  font-weight: 700;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-  opacity: .65;
-}
-
-.server-clock-value {
+.server-clock-date,
+.server-clock-time {
+  display: block;
   font-variant-numeric: tabular-nums;
   /* Моноширинные цифры: строка не дергается на каждой секунде. */
   font-feature-settings: "tnum" 1;
   font-weight: 700;
 }
 
-.server-clock-zone {
-  font-size: .76rem;
-  opacity: .6;
+.server-clock-date {
+  font-size: .72rem;
+  opacity: .72;
+}
+
+.server-clock-time {
+  font-size: .9rem;
+}
+
+.mail-recall-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 11px;
+  border: 1px solid rgba(254,202,202,.7);
+  border-radius: 8px;
+  color: #fee2e2;
+}
+
+.mail-recall-link:hover {
+  background: rgba(220,38,38,.18);
 }
 
 .settings-link {
@@ -185,10 +198,6 @@
   .nav-main,
   .nav-tools {
     flex-wrap: wrap;
-  }
-
-  .server-clock-zone {
-    display: none;
   }
 
   .settings-grid {

@@ -11,8 +11,9 @@
   const node = document.getElementById('server-clock');
   if (!node) return;
 
-  const value = node.querySelector('[data-server-clock-value]');
-  if (!value) return;
+  const dateValue = node.querySelector('[data-server-clock-date]');
+  const timeValue = node.querySelector('[data-server-clock-time]');
+  if (!dateValue || !timeValue) return;
 
   const epochMs = Number(node.dataset.epochMs);
   const offsetMinutes = Number(node.dataset.offsetMinutes);
@@ -27,9 +28,10 @@
     // Сдвигаем момент на смещение сервера и читаем его UTC-компоненты:
     // получаем настенное время сервера независимо от пояса браузера.
     const shifted = new Date(Date.now() + skewMs + offsetMinutes * 60000);
-    value.textContent =
+    dateValue.textContent =
       `${pad(shifted.getUTCDate())}.${pad(shifted.getUTCMonth() + 1)}.` +
-      `${shifted.getUTCFullYear()} ` +
+      `${shifted.getUTCFullYear()}`;
+    timeValue.textContent =
       `${pad(shifted.getUTCHours())}:${pad(shifted.getUTCMinutes())}:` +
       `${pad(shifted.getUTCSeconds())}`;
   }

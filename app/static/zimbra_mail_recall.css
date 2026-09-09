@@ -1,0 +1,219 @@
+.mail-recall-page {
+  display: grid;
+  gap: 20px;
+}
+
+.mail-recall-page .card {
+  margin: 0;
+}
+
+.recall-card-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+.recall-card-heading h2 {
+  margin: 0 0 6px;
+}
+
+.recall-card-heading p {
+  margin: 0;
+}
+
+.recall-form-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 16px;
+}
+
+.recall-form-grid label,
+.recall-advanced label {
+  display: grid;
+  gap: 7px;
+}
+
+.recall-form-grid label > span,
+.recall-advanced label > span {
+  font-weight: 700;
+}
+
+.recall-subject-field {
+  grid-column: span 3;
+}
+
+.recall-advanced {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #f8fafc;
+}
+
+.recall-advanced summary {
+  color: #475569;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.recall-advanced[open] summary {
+  margin-bottom: 12px;
+}
+
+.recall-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.recall-form-actions .button {
+  flex: 0 0 auto;
+  min-width: 170px;
+}
+
+.recall-progress-card progress {
+  display: block;
+  width: 100%;
+  height: 15px;
+  accent-color: #2563eb;
+}
+
+.recall-progress-grid,
+.recall-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.recall-progress-grid > div,
+.recall-summary-grid > div {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid #dbe3ee;
+  border-radius: 9px;
+  background: #f8fafc;
+}
+
+.recall-progress-grid span,
+.recall-summary-grid span {
+  color: #64748b;
+  font-size: .84rem;
+}
+
+.recall-progress-grid strong,
+.recall-summary-grid strong {
+  font-size: 1.15rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.recall-summary-grid .good {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.recall-summary-grid .warn {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.recall-summary-grid .bad {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.recall-source-details {
+  display: grid;
+  grid-template-columns: minmax(170px, 230px) minmax(0, 1fr);
+  gap: 9px 18px;
+  margin: 0;
+  padding: 15px;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #f8fafc;
+}
+
+.recall-source-details dt {
+  color: #64748b;
+  font-weight: 700;
+}
+
+.recall-source-details dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.recall-candidate-list {
+  display: grid;
+  gap: 12px;
+}
+
+.recall-candidate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 15px;
+  border: 1px solid #fcd34d;
+  border-radius: 9px;
+  background: #fffbeb;
+}
+
+.recall-candidate > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.recall-candidate code {
+  overflow-wrap: anywhere;
+}
+
+.recall-details-table {
+  margin-top: 18px;
+}
+
+.recall-details-table .journal-error {
+  display: inline-block;
+  margin: 0;
+}
+
+@media (max-width: 1000px) {
+  .recall-form-grid {
+    grid-template-columns: repeat(2, minmax(160px, 1fr));
+  }
+
+  .recall-subject-field {
+    grid-column: span 2;
+  }
+
+  .recall-progress-grid,
+  .recall-summary-grid {
+    grid-template-columns: repeat(2, minmax(130px, 1fr));
+  }
+}
+
+@media (max-width: 650px) {
+  .recall-card-heading,
+  .recall-form-actions,
+  .recall-candidate {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .recall-form-grid,
+  .recall-progress-grid,
+  .recall-summary-grid,
+  .recall-source-details {
+    grid-template-columns: 1fr;
+  }
+
+  .recall-subject-field {
+    grid-column: auto;
+  }
+}

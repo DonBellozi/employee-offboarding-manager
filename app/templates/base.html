@@ -9,9 +9,11 @@
   {% if user %}
   <link rel="stylesheet" href="/static/zimbra_observer.css">
   <link rel="stylesheet" href="/static/zimbra_mail_cleanup.css">
+  <link rel="stylesheet" href="/static/zimbra_mail_recall.css">
   <link rel="stylesheet" href="/static/workspace_modal.css">
   <script src="/static/zimbra_observer.js" defer></script>
   <script src="/static/zimbra_mail_cleanup.js" defer></script>
+  <script src="/static/zimbra_mail_recall.js" defer></script>
   <script src="/static/workspace_modal.js" defer></script>
   <script src="/static/server_clock.js" defer></script>
   {% endif %}
@@ -43,10 +45,14 @@
                 title="Время сервера, {{ clock.zone }} ({{ clock.offset_label }}). По нему работают расписания и контрольное окно кадровых выгрузок."
                 data-epoch-ms="{{ clock.epoch_ms }}"
                 data-offset-minutes="{{ clock.offset_minutes }}">
-            <span class="server-clock-label">сервер</span>
-            <span class="server-clock-value" data-server-clock-value>{{ clock.text }}</span>
-            <span class="server-clock-zone">{{ clock.zone }}</span>
+            <span class="server-clock-date" data-server-clock-date>{{ clock.date }}</span>
+            <span class="server-clock-time" data-server-clock-time>{{ clock.time }}</span>
           </span>
+          {% endif %}
+          {% if user.role == 'admin' and request.url.path == '/' %}
+          <a class="mail-recall-link"
+             href="/zimbra-recall"
+             title="Удаление ошибочно отправленного письма">Отзыв</a>
           {% endif %}
           {% if user.role == 'admin' %}
           <a class="settings-link" href="/settings">Настройки</a>

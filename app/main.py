@@ -27,6 +27,7 @@ from app.routers import (
     telegram_settings,
     zimbra_lifecycle,
     zimbra_mail_cleanup,
+    zimbra_mail_recall,
     zimbra_observer,
     zimbra_protection,
 )
@@ -43,6 +44,7 @@ from app.services.techexpert_lifecycle import TechExpertLifecycleWorker
 from app.services.zimbra_observer_scheduler import ZimbraObserverScheduler
 from app.services.zimbra_mail_cleanup import ZimbraMailCleanupService
 from app.services.zimbra_mail_cleanup_scheduler import ZimbraMailCleanupScheduler
+from app.services.zimbra_mail_recall import ZimbraMailRecallService
 from app.services.zimbra_employment_lifecycle import (
     ZimbraEmploymentLifecycleWorker,
 )
@@ -64,6 +66,7 @@ async def lifespan(_: FastAPI):
         source_registry.apply_primary_to_settings()
         ensure_bootstrap_admin(db, settings)
         ZimbraMailCleanupService(settings, db).recover_interrupted_runs()
+        ZimbraMailRecallService(settings, db).recover_interrupted_runs()
 
     onec_scheduler = OneCAutoImportScheduler(settings, SessionLocal)
     blocking_worker = BlockingQueueWorker(settings, SessionLocal)
@@ -148,6 +151,7 @@ app.include_router(zimbra_observer.router)
 app.include_router(zimbra_protection.router)
 app.include_router(zimbra_lifecycle.router)
 app.include_router(zimbra_mail_cleanup.router)
+app.include_router(zimbra_mail_recall.router)
 app.include_router(mail_templates.router)
 app.include_router(admin.router)
 

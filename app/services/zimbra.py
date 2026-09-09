@@ -856,6 +856,43 @@ class ZimbraService:
             return None
         return self.accounts_by_addresses([normalized]).get(normalized)
 
+    def administrative_account_by_address(
+        self,
+        email: str,
+    ) -> ZimbraAccountIdentity | None:
+        """Разрешить primary/alias для административной почтовой операции.
+
+        В отличие от фоновой проверки логинов, административные операции
+        работают независимо от ZIMBRA_CHECK_ENABLED. Это позволяет надежно
+        определить основной ящик автора и не удалить его Sent-копию, даже
+        если письмо было отправлено с алиаса.
+        """
+
+        normalized = str(email or "").strip().lower()
+        if not normalized or "@" not in normalized:
+            return None
+        if self.settings.zimbra_backend == "disabled":
+            raise RuntimeError("Zimbra backend отключен")
+        escaped = self._escape_ldap_filter_value(normalized)
+        accounts = self._search_accounts(
+            "(|"
+            f"(mail={escaped})"
+            f"(zimbraMailAlias={escaped})"
+            f"(zimbraMailDeliveryAddress={escaped})"
+            ")",
+            expected_count=1,
+        )
+        matches = [
+            account
+            for account in accounts
+            if normalized in account.addresses
+        ]
+        if len(matches) > 1:
+            raise RuntimeError(
+                "Адрес автора связан с несколькими ящиками Zimbra"
+            )
+        return matches[0] if matches else None
+
     def addresses_exist(self, emails: list[str]) -> set[str]:
         return set(self.accounts_by_addresses(emails))
 

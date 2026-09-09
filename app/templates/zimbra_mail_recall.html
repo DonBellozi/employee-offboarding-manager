@@ -1,0 +1,238 @@
+{% extends "base.html" %}
+{% block title %}Отзыв письма{% endblock %}
+{% block content %}
+<div class="mail-recall-page" data-recall-page{% if active_run %} data-active-run-id="{{ active_run.id }}"{% endif %}>
+  <div class="heading-row">
+    <div>
+      <h1>Удаление ошибочной рассылки</h1>
+      <p class="muted">
+        Система находит точное письмо по служебному Message-ID и удаляет его
+        копии из пользовательских ящиков. Экземпляр в «Отправленных» автора
+        сохраняется.
+      </p>
+    </div>
+    <a class="button secondary" href="/">Вернуться в журнал</a>
+  </div>
+
+  {% if global_dry_run %}
+  <div class="alert warning">
+    Включён DRY_RUN. Удаление писем недоступно до отключения безопасного режима.
+  </div>
+  {% endif %}
+  {% if message %}<div class="alert success">{{ message }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  {% if active_run %}
+  <section class="card recall-progress-card" data-recall-progress data-run-id="{{ active_run.id }}">
+    <div class="recall-card-heading">
+      <div>
+        <h2>Отзыв выполняется</h2>
+        <p class="muted" data-recall-phase>{{ active_phase }}</p>
+      </div>
+      <span class="status running" data-recall-status>
+        {{ status_labels.get(active_run.status, active_run.status) }}
+      </span>
+    </div>
+    <progress
+      max="{{ active_run.total_mailboxes if active_run.total_mailboxes else 1 }}"
+      value="{{ active_run.processed_mailboxes if active_run.total_mailboxes else 0 }}"
+      data-recall-progress-bar></progress>
+    <div class="recall-progress-grid">
+      <div><span>Проверено ящиков</span><strong data-recall-processed>{{ active_run.processed_mailboxes }}</strong></div>
+      <div><span>Всего ящиков</span><strong data-recall-total>{{ active_run.total_mailboxes or '—' }}</strong></div>
+      <div><span>Найдено копий</span><strong data-recall-found>{{ active_run.found_messages }}</strong></div>
+      <div><span>Подтверждено удалено</span><strong data-recall-deleted>{{ active_run.deleted_messages }}</strong></div>
+      <div><span>Осталось</span><strong data-recall-remaining>{{ active_run.remaining_messages }}</strong></div>
+      <div><span>Ошибок</span><strong data-recall-errors>{{ active_run.error_count }}</strong></div>
+    </div>
+  </section>
+  {% endif %}
+
+  <section class="card recall-form-card">
+    <div class="recall-card-heading">
+      <div>
+        <h2>Параметры письма</h2>
+        <p class="muted">
+          После нажатия поиск и удаление начинаются сразу. Дополнительного
+          подтверждения не будет.
+        </p>
+      </div>
+    </div>
+    <form method="post" action="/zimbra-recall/start" data-recall-start-form>
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <div class="recall-form-grid">
+        <label>
+          <span>Автор</span>
+          <input type="email" name="sender_email" placeholder="author@domain.ru" required>
+        </label>
+        <label>
+          <span>Кому отправлено</span>
+          <input type="email" name="recipient_email" placeholder="group@domain.ru" required>
+        </label>
+        <label>
+          <span>Дата отправки</span>
+          <input type="date" name="sent_date" required>
+        </label>
+        <label>
+          <span>Примерное время</span>
+          <input type="time" name="approximate_time" step="60" required>
+        </label>
+        <label>
+          <span>Допуск по времени</span>
+          <select name="time_window_minutes">
+            <option value="15">± 15 минут</option>
+            <option value="30" selected>± 30 минут</option>
+            <option value="60">± 1 час</option>
+            <option value="120">± 2 часа</option>
+          </select>
+        </label>
+        <label class="recall-subject-field">
+          <span>Тема письма <small class="muted">необязательно</small></span>
+          <input type="text" name="subject_hint" maxlength="512" placeholder="Часть или полная тема">
+        </label>
+      </div>
+      <details class="recall-advanced">
+        <summary>Если известен Message-ID</summary>
+        <label>
+          <span>Message-ID</span>
+          <input type="text" name="message_id" maxlength="998" placeholder="123456@example.org">
+          <small class="muted">
+            При заполнении поиск исходника в «Отправленных» пропускается,
+            но папка автора всё равно сохраняется.
+          </small>
+        </label>
+      </details>
+      <div class="recall-form-actions">
+        <button class="button danger" type="submit"{% if global_dry_run or active_run %} disabled{% endif %} data-recall-start-button>
+          Найти и удалить
+        </button>
+        <span class="muted">
+          Удаляются обычные копии, включая «Корзину» и «Спам». Dumpster и
+          резервные копии не очищаются.
+        </span>
+      </div>
+    </form>
+  </section>
+
+  {% if selected_run %}
+  <section class="card recall-result-card" id="result">
+    <div class="recall-card-heading">
+      <div>
+        <h2>Отзыв #{{ selected_run.id }}</h2>
+        <p class="muted">
+          {{ selected_run.sender_email }} → {{ selected_run.recipient_email }} ·
+          {{ selected_run.sent_date.strftime('%d.%m.%Y') }}
+          {{ selected_run.approximate_time }}
+        </p>
+      </div>
+      <span class="status {{ 'success' if selected_run.status == 'success' else 'failed' if selected_run.status == 'failed' else 'running' if selected_run.status in ['queued', 'running'] else 'partial' }}">
+        {{ status_labels.get(selected_run.status, selected_run.status) }}
+      </span>
+    </div>
+
+    {% if selected_run.error_message %}
+    <div class="alert {{ 'error' if selected_run.status == 'failed' else 'warning' }}">
+      {{ selected_run.error_message }}
+    </div>
+    {% endif %}
+
+    {% if selected_run.status == 'needs_selection' %}
+    <div class="recall-candidate-list">
+      {% for candidate in selected_candidates %}
+      <article class="recall-candidate">
+        <div>
+          <strong>{{ candidate.subject or 'Без темы' }}</strong>
+          <div class="muted">{{ candidate.sent_at_label }}</div>
+          {% if candidate.recipient %}<div class="muted">Кому: {{ candidate.recipient }}</div>{% endif %}
+          <code>{{ candidate.message_id }}</code>
+        </div>
+        <form method="post" action="/zimbra-recall/{{ selected_run.id }}/select/{{ loop.index0 }}" data-recall-candidate-form>
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="button danger" type="submit">Удалить это письмо</button>
+        </form>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <dl class="recall-source-details">
+      <dt>Автор</dt><dd>{{ selected_run.sender_email }}</dd>
+      <dt>Основной ящик автора</dt><dd>{{ selected_run.author_mailbox or '—' }}</dd>
+      <dt>Тема</dt><dd>{{ selected_run.source_subject or selected_run.subject_hint or '—' }}</dd>
+      <dt>Message-ID</dt><dd><code>{{ selected_run.message_id or '—' }}</code></dd>
+      <dt>Копия автора</dt><dd>«Отправленные» исключены из удаления</dd>
+    </dl>
+
+    <div class="recall-summary-grid">
+      <div><span>Проверено ящиков</span><strong>{{ selected_run.processed_mailboxes }} из {{ selected_run.total_mailboxes or '—' }}</strong></div>
+      <div><span>Ящиков с копиями</span><strong>{{ selected_run.matched_mailboxes }}</strong></div>
+      <div><span>Найдено копий</span><strong>{{ selected_run.found_messages }}</strong></div>
+      <div class="good"><span>Подтверждено удалено</span><strong>{{ selected_run.deleted_messages }}</strong></div>
+      <div class="{{ 'good' if selected_run.remaining_messages == 0 else 'warn' }}"><span>Осталось</span><strong>{{ selected_run.remaining_messages }}</strong></div>
+      <div class="{{ 'good' if selected_run.error_count == 0 else 'bad' }}"><span>Ошибок</span><strong>{{ selected_run.error_count }}</strong></div>
+      <div><span>Длительность</span><strong>{{ selected_run.duration_ms|duration_ms }}</strong></div>
+    </div>
+
+    {% if selected_details %}
+    <div class="table-wrap recall-details-table">
+      <table class="journal-table">
+        <thead>
+          <tr><th>Почтовый ящик</th><th>Найдено</th><th>Подтверждено удалено</th><th>Осталось</th><th>Результат</th></tr>
+        </thead>
+        <tbody>
+          {% for detail in selected_details %}
+          <tr>
+            <td>
+              {{ detail.mailbox }}
+              {% if detail.sent_excluded %}<div class="muted">«Отправленные» сохранены</div>{% endif %}
+            </td>
+            <td>{{ detail.found }}</td>
+            <td>{{ detail.deleted }}</td>
+            <td>{{ detail.remaining }}</td>
+            <td>
+              {% if detail.error %}<span class="journal-error">{{ detail.error }}</span>
+              {% elif detail.remaining %}<span class="status partial">Остались копии</span>
+              {% else %}<span class="status success">Удалено</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <section class="card recall-history-card">
+    <div class="recall-card-heading">
+      <div>
+        <h2>Последние отзывы</h2>
+        <p class="muted">Тело письма не сохраняется.</p>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="journal-table">
+        <thead>
+          <tr><th>Запуск</th><th>Автор</th><th>Кому</th><th>Дата письма</th><th>Подтверждено удалено</th><th>Осталось</th><th>Статус</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for run in runs %}
+          <tr>
+            <td>{{ run.created_at|app_datetime('%d.%m.%Y %H:%M') }}</td>
+            <td>{{ run.sender_email }}</td>
+            <td>{{ run.recipient_email }}</td>
+            <td>{{ run.sent_date.strftime('%d.%m.%Y') }} {{ run.approximate_time }}</td>
+            <td>{{ run.deleted_messages }}</td>
+            <td>{{ run.remaining_messages }}</td>
+            <td>{{ status_labels.get(run.status, run.status) }}</td>
+            <td><a class="button small secondary" href="/zimbra-recall?run_id={{ run.id }}#result">Открыть</a></td>
+          </tr>
+          {% else %}
+          <tr><td colspan="8" class="muted">Отзывов пока не было.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endblock %}
