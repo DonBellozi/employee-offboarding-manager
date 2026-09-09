@@ -3,6 +3,20 @@
   gap: 20px;
 }
 
+.recall-mode {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
+.recall-mode label { display: flex; align-items: center; gap: 7px; }
+.recall-mode input, .mail-recall-page input[type="checkbox"] { width: auto; }
+.recall-fields { border: 0; padding: 0; margin: 16px 0 0; min-width: 0; }
+.recall-fields[hidden] { display: none; }
+.recall-fields > label { display: grid; gap: 7px; }
+.mail-recall-page code { overflow-wrap: anywhere; }
+
 .mail-recall-page .card {
   margin: 0;
 }

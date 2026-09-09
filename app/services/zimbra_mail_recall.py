@@ -4,35 +4,43 @@ import json
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from email.header import decode_header, make_header
+from email.parser import HeaderParser
 from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import AuditLog
-from app.models_zimbra_recall import ZimbraMailRecallRun
+from app.models_zimbra_recall import ZimbraMailRecallBatch, ZimbraMailRecallRun
 from app.services.zimbra import ZimbraService
 from app.services.zimbra_mail_cleanup import (
-    SEARCH_LIMIT,
     ZimbraMailCleanupService,
     normalize_email,
     utcnow,
 )
 
 
-ACTIVE_STATUSES = {"queued", "running"}
+ACTIVE_STATUSES = {"queued", "running", "stopping"}
+BATCH_LIMIT = 50
 CANDIDATE_LIMIT = 100
 DELETE_PASSES = 3
 ALLOWED_WINDOWS = {15, 30, 60, 120}
-HEADER_VALUE_RE = re.compile(
-    r"(?im)^[ \t]*(?P<name>[A-Za-z][A-Za-z0-9-]*):[ \t]*(?P<value>[^\r\n]*)"
-)
+
+
+class RecallCancelled(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class RecallTarget:
+    run_id: int
+    message_id: str
+    author_mailbox: str
 
 
 @dataclass(frozen=True)
@@ -87,6 +95,8 @@ class ZimbraMailRecallService:
     """Срочно удалить копии одного письма, сохранив Sent автора."""
 
     _run_lock = threading.Lock()
+    _events_lock = threading.Lock()
+    _cancel_events: dict[int, threading.Event] = {}
 
     def __init__(self, settings: Settings, db: Session):
         self.settings = settings
@@ -116,7 +126,9 @@ class ZimbraMailRecallService:
         if (
             not raw
             or len(raw) > 998
-            or "@" not in raw
+            or raw.count("@") != 1
+            or raw.startswith("@") or raw.endswith("@")
+            or "<" in raw or ">" in raw
             or any(character.isspace() for character in raw)
             or any(character in raw for character in ('"', "'", "\\"))
             or any(ord(character) < 32 for character in raw)
@@ -172,12 +184,14 @@ class ZimbraMailRecallService:
         *,
         sender_email: str,
         recipient_email: str,
-        sent_date: date,
+        sent_date: date | None,
         approximate_time: str,
         time_window_minutes: int,
         subject_hint: str,
         message_id: str,
         actor: str,
+        lookup_mailbox: str = "",
+        draft: bool = False,
     ) -> ZimbraMailRecallRun:
         if self.settings.dry_run:
             raise RuntimeError(
@@ -187,33 +201,46 @@ class ZimbraMailRecallService:
             raise RuntimeError("Zimbra backend отключен")
 
         sender = normalize_email(sender_email, field_name="адрес автора")
-        recipient = normalize_email(
-            recipient_email,
-            field_name="адрес получателя или группы",
-        )
         sender_domain = sender.rsplit("@", 1)[1]
         if sender_domain not in self._allowed_domains():
             raise ValueError(
                 "Автор должен находиться в одном из настроенных доменов Zimbra"
             )
-        normalized_time = self._parse_time(approximate_time)
-        window = int(time_window_minutes)
-        if window not in ALLOWED_WINDOWS:
-            raise ValueError("Выберите допустимый интервал времени")
         normalized_message_id = (
             self.normalize_message_id(message_id) if message_id.strip() else ""
         )
+        if normalized_message_id:
+            recipient, normalized_time, window = "", "", 30
+            lookup_mailbox = ""
+        else:
+            recipient = normalize_email(recipient_email, field_name="адрес получателя или группы")
+            if not isinstance(sent_date, date):
+                raise ValueError("Укажите дату отправки")
+            normalized_time = self._parse_time(approximate_time)
+            window = int(time_window_minutes)
+            if window not in ALLOWED_WINDOWS:
+                raise ValueError("Выберите допустимый интервал времени")
+            if lookup_mailbox.strip():
+                lookup_mailbox = normalize_email(lookup_mailbox, field_name="ящик получателя")
+                if lookup_mailbox.rsplit("@", 1)[1] not in self._allowed_domains():
+                    raise ValueError("Ящик получателя должен быть в настроенном домене Zimbra")
         subject = str(subject_hint or "").strip()[:512]
-        if self.active_run() is not None:
-            raise RuntimeError("Другой отзыв письма уже выполняется")
+        if normalized_message_id and self.db.scalar(select(ZimbraMailRecallRun.id).where(
+            ZimbraMailRecallRun.message_id == normalized_message_id,
+            ZimbraMailRecallRun.status.in_({"draft", "needs_selection", *ACTIVE_STATUSES}),
+        ).limit(1)):
+            raise ValueError("Этот Message-ID уже есть в пакете или выполняющемся запросе")
 
         run = ZimbraMailRecallRun(
-            status="queued",
+            status="draft" if draft else "queued",
             initiated_by=str(actor or "")[:256],
+            lookup_mailbox=lookup_mailbox.strip(),
             sender_email=sender,
             recipient_email=recipient,
             subject_hint=subject,
-            sent_date=sent_date,
+            # Legacy column is NOT NULL in deployed databases. For direct ID
+            # this is only a storage default: never a search filter or UI date.
+            sent_date=sent_date if not normalized_message_id else utcnow().date(),
             approximate_time=normalized_time,
             time_window_minutes=window,
             message_id=normalized_message_id,
@@ -238,7 +265,7 @@ class ZimbraMailRecallService:
             {
                 "sender_email": sender,
                 "recipient_email": recipient,
-                "sent_date": sent_date.isoformat(),
+                "sent_date": sent_date.isoformat() if not normalized_message_id else None,
                 "approximate_time": normalized_time,
                 "time_window_minutes": window,
                 "direct_message_id": bool(normalized_message_id),
@@ -263,8 +290,6 @@ class ZimbraMailRecallService:
         candidates = self.candidates(run)
         if candidate_index < 0 or candidate_index >= len(candidates):
             raise ValueError("Выбранное письмо не найдено")
-        if self.active_run() is not None:
-            raise RuntimeError("Другой отзыв письма уже выполняется")
 
         candidate = candidates[candidate_index]
         run.message_id = self.normalize_message_id(
@@ -277,6 +302,7 @@ class ZimbraMailRecallService:
             datetime.fromisoformat(sent_at) if sent_at else None
         )
         run.status = "queued"
+        run.batch_id = 0
         run.error_message = ""
         run.completed_at = None
         run.progress_at = utcnow()
@@ -295,11 +321,14 @@ class ZimbraMailRecallService:
 
     @staticmethod
     def _header_values(output: str) -> dict[str, list[str]]:
+        # Only the RFC822 header block, not lookalike lines in the body.
+        block = re.split(r"\r?\n\r?\n", str(output or ""), maxsplit=1)[0]
+        if len(block) > 262144:
+            raise ValueError("Слишком большой блок заголовков письма")
+        message = HeaderParser().parsestr(block, headersonly=True)
         values: dict[str, list[str]] = {}
-        for match in HEADER_VALUE_RE.finditer(str(output or "")):
-            values.setdefault(match.group("name").lower(), []).append(
-                match.group("value").strip()
-            )
+        for name, value in message.items():
+            values.setdefault(name.lower(), []).append(re.sub(r"\r?\n[ \t]+", " ", value).strip())
         return values
 
     @staticmethod
@@ -343,6 +372,8 @@ class ZimbraMailRecallService:
         output: str,
     ) -> RecallCandidate:
         headers = self._header_values(output)
+        if len(headers.get("message-id", [])) != 1:
+            raise ValueError("Исходное письмо не содержит единственный заголовок Message-ID")
 
         def first(*names: str) -> str:
             for name in names:
@@ -352,7 +383,7 @@ class ZimbraMailRecallService:
             return ""
 
         message_id = self.normalize_message_id(
-            first("message-id", "messageid")
+            first("message-id")
         )
         return RecallCandidate(
             local_id=str(local_id),
@@ -368,10 +399,7 @@ class ZimbraMailRecallService:
         candidate: RecallCandidate,
     ) -> bool:
         if candidate.sent_at is None:
-            # В старых версиях zmmailbox дата в verbose-ответе может быть
-            # локализована необычным образом. Такой вариант нельзя молча
-            # отбросить: оператор увидит его при неоднозначности.
-            return True
+            raise ValueError("Не удалось проверить дату и время найденного письма")
         local = candidate.sent_at.astimezone(
             ZoneInfo(self.settings.app_timezone)
         )
@@ -390,6 +418,7 @@ class ZimbraMailRecallService:
         self,
         run: ZimbraMailRecallRun,
         zimbra: ZimbraService,
+        cancel: threading.Event | None = None,
     ) -> list[RecallCandidate]:
         # Пересобираем также запросы, поставленные в очередь старой версией.
         run.source_search_query = self.build_source_query(
@@ -398,12 +427,14 @@ class ZimbraMailRecallService:
             sent_date=run.sent_date,
             subject_hint=run.subject_hint,
         )
+        if run.lookup_mailbox:
+            run.source_search_query = run.source_search_query.replace("in:sent", "is:anywhere -in:sent", 1)
         self.db.commit()
         client = zimbra._client()
         try:
             output = zimbra.execute_mailbox_command(
                 client,
-                run.author_mailbox,
+                run.lookup_mailbox or run.author_mailbox,
                 [
                     "search",
                     "-t",
@@ -424,30 +455,12 @@ class ZimbraMailRecallService:
             by_message_id: set[str] = set()
             errors: list[str] = []
             for local_id in batch.message_ids:
+                if cancel is not None and cancel.is_set():
+                    raise RecallCancelled()
                 try:
-                    verbose = zimbra.execute_mailbox_command(
-                        client,
-                        run.author_mailbox,
-                        ["getMessage", "-v", local_id],
-                        timeout=180,
+                    candidate = self._read_candidate(
+                        zimbra, client, run.lookup_mailbox or run.author_mailbox, local_id,
                     )
-                    try:
-                        candidate = self.parse_candidate(local_id, verbose)
-                    except ValueError:
-                        # Некоторые выпуски Zimbra в verbose-режиме выводят
-                        # только служебные метаданные без MIME Message-ID.
-                        # Обычный getMessage возвращает исходное письмо; оно
-                        # используется в памяти только для чтения заголовков.
-                        raw_message = zimbra.execute_mailbox_command(
-                            client,
-                            run.author_mailbox,
-                            ["getMessage", local_id],
-                            timeout=180,
-                        )
-                        candidate = self.parse_candidate(
-                            local_id,
-                            raw_message,
-                        )
                     if not self._candidate_matches_time(run, candidate):
                         continue
                     if candidate.message_id in by_message_id:
@@ -456,7 +469,8 @@ class ZimbraMailRecallService:
                     candidates.append(candidate)
                 except Exception as exc:
                     errors.append(f"{local_id}: {str(exc)[:500]}")
-            if not candidates and errors:
+            # An unreadable second hit must not make the first hit "unique".
+            if errors:
                 raise RuntimeError(
                     "Не удалось прочитать служебные заголовки найденных "
                     f"писем: {'; '.join(errors[:3])}"
@@ -465,284 +479,105 @@ class ZimbraMailRecallService:
         finally:
             client.close()
 
-    def _process_mailbox(
-        self,
-        zimbra: ZimbraService,
-        mailbox: str,
-        *,
-        author_mailbox: str,
-        message_id: str,
-    ) -> RecallMailboxResult:
-        started = time.monotonic()
-        preserve_sent = mailbox == author_mailbox
-        query = self.build_message_query(
-            message_id,
-            preserve_sent=preserve_sent,
+    def _read_candidate(self, zimbra, client, mailbox: str, local_id: str) -> RecallCandidate:
+        if not re.fullmatch(r"[1-9][0-9]*", str(local_id)):
+            raise ValueError("Некорректный внутренний номер письма")
+        # getMessage (including -v) is a presentation/metadata command.
+        # REST Get Item with no fmt returns original MIME RFC822 headers.
+        # https://wiki.zimbra.com/wiki/Zimbra_REST_API_Reference:Get_Item
+        raw = zimbra.execute_mailbox_command(
+            client, mailbox, ["getRestURL", f"/?id={local_id}"], timeout=180,
         )
-        found_ids: set[str] = set()
-        deleted_ids: set[str] = set()
-        remaining = 0
-        verification_complete = False
-        error = ""
-        try:
-            client = zimbra._client()
-        except Exception as exc:
-            return RecallMailboxResult(
-                mailbox=mailbox,
-                found=0,
-                deleted=0,
-                remaining=0,
-                sent_excluded=preserve_sent,
-                duration_ms=int((time.monotonic() - started) * 1000),
-                error=str(exc)[:2000],
-            )
-
-        try:
-            for _ in range(DELETE_PASSES):
-                output = zimbra.execute_mailbox_command(
-                    client,
-                    mailbox,
-                    [
-                        "search",
-                        "-t",
-                        "message",
-                        "-l",
-                        str(SEARCH_LIMIT),
-                        query,
-                    ],
-                    timeout=180,
-                )
-                batch = ZimbraMailCleanupService.parse_search_output(output)
-                current_ids = set(batch.message_ids)
-                found_ids.update(current_ids)
-                if not current_ids:
-                    remaining = 0
-                    break
-                zimbra.execute_mailbox_command(
-                    client,
-                    mailbox,
-                    ["deleteMessage", ",".join(batch.message_ids)],
-                    timeout=180,
-                    mutating=True,
-                )
-                deleted_ids.update(current_ids)
-            if found_ids:
-                verification_output = zimbra.execute_mailbox_command(
-                    client,
-                    mailbox,
-                    [
-                        "search",
-                        "-t",
-                        "message",
-                        "-l",
-                        str(SEARCH_LIMIT),
-                        query,
-                    ],
-                    timeout=180,
-                )
-                verification = ZimbraMailCleanupService.parse_search_output(
-                    verification_output
-                )
-                remaining = len(verification.message_ids)
-                if verification.more:
-                    remaining = max(remaining, SEARCH_LIMIT + 1)
-                verification_complete = True
-        except Exception as exc:
-            error = str(exc)[:2000]
-        finally:
-            client.close()
-
-        return RecallMailboxResult(
-            mailbox=mailbox,
-            found=len(found_ids),
-            deleted=(
-                max(0, len(deleted_ids) - remaining)
-                if verification_complete
-                else 0
-            ),
-            remaining=remaining,
-            sent_excluded=preserve_sent,
-            duration_ms=int((time.monotonic() - started) * 1000),
-            error=error,
-        )
+        return self.parse_candidate(local_id, raw)
 
     def execute_run(self, run_id: int) -> ZimbraMailRecallRun:
         run = self.get_run(run_id)
         if run is None:
-            raise ValueError("Запуск отзыва не найден")
+            raise ValueError("Запрос отзыва не найден")
         if run.status != "queued":
-            raise ValueError("Запуск уже обработан")
-        if not self._run_lock.acquire(blocking=False):
-            return self._fail(
-                run,
-                RuntimeError("Другой отзыв письма уже выполняется"),
-                started=time.monotonic(),
-            )
+            raise ValueError("Запрос уже обработан")
+        if not run.batch_id:
+            self.queue_batch([run.id], actor=run.initiated_by, allowed_status="queued")
+        self.execute_queue()
+        self.db.refresh(run)
+        return run
 
-        started = time.monotonic()
-        try:
-            run.status = "running"
-            run.started_at = run.started_at or utcnow()
-            run.progress_at = utcnow()
-            self.db.commit()
+    def execute_queue(self) -> None:
+        from app.services.zimbra_recall_batch import execute_queue
+        execute_queue(self)
 
-            zimbra = ZimbraService(self.settings)
-            author = zimbra.administrative_account_by_address(
-                run.sender_email
-            )
-            if author is None:
-                raise RuntimeError(
-                    "Не удалось однозначно определить основной ящик автора. "
-                    "Удаление не начато, чтобы сохранить папку «Отправленные»"
-                )
-            run.author_mailbox = author.primary_email
-            self.db.commit()
-
-            if not run.message_id:
-                candidates = self._find_source_candidates(run, zimbra)
-                candidate_rows = [
-                    candidate.as_dict(self.settings.app_timezone)
-                    for candidate in candidates
-                ]
-                run.candidates_json = json.dumps(
-                    candidate_rows,
-                    ensure_ascii=False,
-                )
-                if not candidates:
-                    raise RuntimeError(
-                        "В «Отправленных» автора не найдено письмо в указанную "
-                        "дату и время. Проверьте получателя, тему и интервал"
-                    )
-                if len(candidates) > 1:
-                    run.status = "needs_selection"
-                    run.error_message = (
-                        "Найдено несколько разных писем. Выберите нужное — "
-                        "после выбора удаление начнётся сразу"
-                    )
-                    run.duration_ms = int(
-                        (time.monotonic() - started) * 1000
-                    )
-                    run.progress_at = utcnow()
-                    self._audit(
-                        run.initiated_by,
-                        "zimbra_mail_recall_needs_selection",
-                        f"recall:{run.id}",
-                        {"candidate_count": len(candidates)},
-                    )
-                    self.db.commit()
-                    self.db.refresh(run)
-                    return run
-                selected = candidates[0]
-                run.message_id = selected.message_id
-                run.source_local_id = selected.local_id
-                run.source_subject = selected.subject
-                run.source_sent_at = selected.sent_at
-                self.db.commit()
-
-            with zimbra._query_lock:
-                mailboxes = zimbra.list_user_mailboxes()
-            if run.author_mailbox not in mailboxes:
-                raise RuntimeError(
-                    "Основной ящик автора отсутствует в безопасном списке "
-                    "пользовательских ящиков. Удаление не начато"
-                )
-
-            run.total_mailboxes = len(mailboxes)
-            run.processed_mailboxes = 0
-            run.progress_at = utcnow()
-            self.db.commit()
-
-            results: list[RecallMailboxResult] = []
-            workers = max(
-                1,
-                min(
-                    int(self.settings.zimbra_mail_cleanup_workers),
-                    len(mailboxes) or 1,
-                ),
-            )
-            with ThreadPoolExecutor(
-                max_workers=workers,
-                thread_name_prefix="zimbra-mail-recall",
-            ) as pool:
-                futures = [
-                    pool.submit(
-                        self._process_mailbox,
-                        zimbra,
-                        mailbox,
-                        author_mailbox=run.author_mailbox,
-                        message_id=run.message_id,
-                    )
-                    for mailbox in mailboxes
-                ]
-                for future in as_completed(futures):
-                    result = future.result()
-                    results.append(result)
-                    run.processed_mailboxes += 1
-                    run.matched_mailboxes += int(result.found > 0)
-                    run.found_messages += result.found
-                    run.deleted_messages += result.deleted
-                    run.remaining_messages += result.remaining
-                    run.error_count += int(bool(result.error))
-                    run.duration_ms = int(
-                        (time.monotonic() - started) * 1000
-                    )
-                    run.progress_at = utcnow()
-                    if result.found or result.remaining or result.error:
-                        run.details_json = json.dumps(
-                            [
-                                item.as_dict()
-                                for item in sorted(
-                                    results,
-                                    key=lambda item: item.mailbox,
-                                )
-                                if item.found or item.remaining or item.error
-                            ],
-                            ensure_ascii=False,
-                        )
-                    self.db.commit()
-
-            run.completed_at = utcnow()
-            run.progress_at = run.completed_at
-            run.duration_ms = int((time.monotonic() - started) * 1000)
-            if run.error_count or run.remaining_messages:
-                run.status = "warning" if run.deleted_messages else "failed"
-                run.error_message = (
-                    "Не все найденные копии удалось удалить. "
-                    "Откройте результат и проверьте ошибки"
-                )
-            elif run.found_messages == 0:
-                run.status = "warning"
-                run.error_message = (
-                    "Исходное письмо найдено, но его копий в пользовательских "
-                    "ящиках уже нет"
-                )
-            else:
-                run.status = "success"
-                run.error_message = ""
-            self._audit(
-                run.initiated_by,
-                "zimbra_mail_recall_completed",
-                f"recall:{run.id}",
-                {
-                    "status": run.status,
-                    "author_mailbox": run.author_mailbox,
-                    "checked_mailboxes": run.processed_mailboxes,
-                    "matched_mailboxes": run.matched_mailboxes,
-                    "found_messages": run.found_messages,
-                    "deleted_messages": run.deleted_messages,
-                    "remaining_messages": run.remaining_messages,
-                    "error_count": run.error_count,
-                },
-            )
-            self.db.commit()
-            self.db.refresh(run)
-            return run
-        except Exception as exc:
+    def queue_batch(self, run_ids: list[int], *, actor: str,
+                    allowed_status: str = "draft") -> ZimbraMailRecallBatch:
+        ids = sorted(set(int(value) for value in run_ids))
+        if not ids or len(ids) > BATCH_LIMIT:
+            raise ValueError(f"Выберите от 1 до {BATCH_LIMIT} запросов")
+        batch = ZimbraMailRecallBatch(initiated_by=actor)
+        self.db.add(batch)
+        self.db.flush()
+        claimed = self.db.execute(update(ZimbraMailRecallRun).where(
+            ZimbraMailRecallRun.id.in_(ids),
+            ZimbraMailRecallRun.status == allowed_status,
+            ZimbraMailRecallRun.batch_id == 0,
+        ).values(status="queued", batch_id=batch.id))
+        if claimed.rowcount != len(ids):
             self.db.rollback()
-            run = self.get_run(run_id)
-            return self._fail(run, exc, started=started)
-        finally:
-            self._run_lock.release()
+            raise ValueError("Часть запросов уже запущена или отменена. Обновите страницу")
+        self._audit(actor, "zimbra_mail_recall_batch_queued", f"recall-batch:{batch.id}",
+                    {"run_ids": ids})
+        self.db.commit()
+        return batch
+
+    def draft_runs(self) -> list[ZimbraMailRecallRun]:
+        return list(self.db.scalars(select(ZimbraMailRecallRun).where(
+            ZimbraMailRecallRun.status == "draft",
+        ).order_by(ZimbraMailRecallRun.id)))
+
+    def batch_runs(self, batch_id: int) -> list[ZimbraMailRecallRun]:
+        return list(self.db.scalars(select(ZimbraMailRecallRun).where(
+            ZimbraMailRecallRun.batch_id == batch_id,
+        ).order_by(ZimbraMailRecallRun.id)))
+
+    def batches(self, *, active_only: bool = False) -> list[ZimbraMailRecallBatch]:
+        query = select(ZimbraMailRecallBatch)
+        if active_only:
+            query = query.where(ZimbraMailRecallBatch.status.in_(ACTIVE_STATUSES))
+        return list(self.db.scalars(query.order_by(desc(ZimbraMailRecallBatch.id)).limit(30)))
+
+    def cancel_batch(self, batch_id: int, *, actor: str) -> None:
+        batch = self.db.get(ZimbraMailRecallBatch, batch_id)
+        if batch is None:
+            raise ValueError("Пакет не найден")
+        # CAS prevents a late click from overwriting a completed result.
+        cancelled = self.db.execute(update(ZimbraMailRecallBatch).where(
+            ZimbraMailRecallBatch.id == batch_id,
+            ZimbraMailRecallBatch.status == "queued",
+        ).values(status="cancelled", completed_at=utcnow()))
+        if cancelled.rowcount:
+            self.db.execute(update(ZimbraMailRecallRun).where(
+                ZimbraMailRecallRun.batch_id == batch_id,
+                ZimbraMailRecallRun.status == "queued",
+            ).values(status="cancelled", completed_at=utcnow()))
+        else:
+            self.db.execute(update(ZimbraMailRecallBatch).where(
+                ZimbraMailRecallBatch.id == batch_id,
+                ZimbraMailRecallBatch.status == "running",
+            ).values(status="stopping"))
+        self._audit(actor, "zimbra_mail_recall_cancel_requested", f"recall-batch:{batch_id}", {})
+        self.db.commit()
+        with self._events_lock:
+            event = self._cancel_events.get(batch_id)
+            if event is not None:
+                event.set()
+
+    def cancel_draft(self, run_id: int, *, actor: str) -> None:
+        changed = self.db.execute(update(ZimbraMailRecallRun).where(
+            ZimbraMailRecallRun.id == run_id,
+            ZimbraMailRecallRun.status.in_({"draft", "needs_selection"}),
+        ).values(status="cancelled", completed_at=utcnow()))
+        if not changed.rowcount:
+            raise ValueError("Запрос уже выполняется; прервите его пакет")
+        self._audit(actor, "zimbra_mail_recall_request_cancelled", f"recall:{run_id}", {})
+        self.db.commit()
 
     def _fail(
         self,
@@ -768,6 +603,11 @@ class ZimbraMailRecallService:
         return run
 
     def recover_interrupted_runs(self) -> int:
+        self.db.execute(update(ZimbraMailRecallBatch).where(
+            ZimbraMailRecallBatch.status.in_(ACTIVE_STATUSES),
+        ).values(status="failed", completed_at=utcnow(), error_message=(
+            "Пакет прерван перезапуском приложения. Автоматического повторного удаления не будет"
+        )))
         runs = list(
             self.db.scalars(
                 select(ZimbraMailRecallRun).where(
@@ -785,8 +625,7 @@ class ZimbraMailRecallService:
             )
             run.completed_at = now
             run.progress_at = now
-        if runs:
-            self.db.commit()
+        self.db.commit()
         return len(runs)
 
     def active_run(self) -> ZimbraMailRecallRun | None:

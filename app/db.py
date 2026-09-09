@@ -49,6 +49,14 @@ def ensure_compatibility_schema() -> None:
     with engine.begin() as connection:
         add_missing_columns(
             connection,
+            "zimbra_mail_recall_runs",
+            {
+                "batch_id": "INTEGER NOT NULL DEFAULT 0",
+                "lookup_mailbox": "VARCHAR(320) NOT NULL DEFAULT ''",
+            },
+        )
+        add_missing_columns(
+            connection,
             "synology_control_settings",
             {
                 "max_disables_per_run": "INTEGER NOT NULL DEFAULT 10",

@@ -2,17 +2,38 @@
   const page = document.querySelector('[data-recall-page]');
   if (!page) return;
 
+  let editing = false;
   const disableSubmittedForm = (form, label) => {
-    form.addEventListener('submit', () => {
-      const button = form.querySelector('button[type="submit"]');
+    form.addEventListener('submit', (event) => {
+      if (form.dataset.submitted) { event.preventDefault(); return; }
+      form.dataset.submitted = 'true';
+      const button = event.submitter || form.querySelector('button[type="submit"]');
       if (!button) return;
-      button.disabled = true;
+      // A disabled submitter is not included in POST. Preserve its action.
+      if (button.name) {
+        const action = document.createElement('input');
+        action.type = 'hidden'; action.name = button.name; action.value = button.value;
+        form.appendChild(action);
+      }
+      form.querySelectorAll('button[type="submit"]').forEach((item) => { item.disabled = true; });
       button.textContent = label;
     });
   };
 
   const startForm = page.querySelector('[data-recall-start-form]');
-  if (startForm) disableSubmittedForm(startForm, 'Запускается…');
+  if (startForm) {
+    disableSubmittedForm(startForm, 'Передаётся…');
+    const idFields = startForm.querySelector('[data-recall-id-fields]');
+    const parameters = startForm.querySelector('[data-recall-parameters]');
+    const applyMode = () => {
+      const byId = startForm.querySelector('[name="lookup_mode"]:checked').value === 'id';
+      idFields.disabled = !byId; idFields.hidden = !byId;
+      parameters.disabled = byId; parameters.hidden = byId;
+    };
+    startForm.querySelectorAll('[name="lookup_mode"]').forEach((radio) => radio.addEventListener('change', applyMode));
+    startForm.addEventListener('input', () => { editing = true; });
+    applyMode();
+  }
   page.querySelectorAll('[data-recall-candidate-form]').forEach((form) => {
     disableSubmittedForm(form, 'Запускается…');
   });
@@ -56,7 +77,7 @@
 
   const poll = async () => {
     try {
-      const response = await fetch(`/zimbra-recall/progress?run_id=${runId}`, {
+      const response = await fetch(`/zimbra-recall/progress?batch_id=${runId}`, {
         headers: { Accept: 'application/json' },
         cache: 'no-store',
       });
@@ -68,6 +89,13 @@
       }
       render(payload.run);
       if (!payload.active) {
+        if (editing) {
+          const link = document.createElement('a');
+          link.href = payload.run.result_url;
+          link.textContent = 'Открыть результат пакета';
+          progress.appendChild(link);
+          return;
+        }
         window.location.assign(payload.run.result_url);
         return;
       }
