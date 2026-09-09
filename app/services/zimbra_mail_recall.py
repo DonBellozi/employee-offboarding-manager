@@ -149,16 +149,18 @@ class ZimbraMailRecallService:
         sent_date: date,
         subject_hint: str,
     ) -> str:
-        # zmmailbox запускается с ru_RU.utf8, поэтому абсолютные даты
-        # передаются в формате локали Zimbra, а не в формате браузера.
-        previous_day = (sent_date - timedelta(days=1)).strftime("%d.%m.%Y")
-        next_day = (sent_date + timedelta(days=1)).strftime("%d.%m.%Y")
+        # Поиск разбирает mailboxd; LC_ALL SSH-сеанса не задаёт ему локаль.
+        # Штатный формат абсолютных дат для zmmailbox: MM/DD/YYYY.
+        # Календарную дату и время затем проверяет _candidate_matches_time
+        # в часовом поясе приложения.
+        previous_day = (sent_date - timedelta(days=1)).strftime("%m/%d/%Y")
+        next_day = (sent_date + timedelta(days=1)).strftime("%m/%d/%Y")
         parts = [
             "in:sent",
             f'from:"{sender_email}"',
             f'tocc:"{recipient_email}"',
-            f'after:"{previous_day}"',
-            f'before:"{next_day}"',
+            f"after:{previous_day}",
+            f"before:{next_day}",
         ]
         safe_subject = cls._safe_search_text(subject_hint)
         if safe_subject:
@@ -389,6 +391,14 @@ class ZimbraMailRecallService:
         run: ZimbraMailRecallRun,
         zimbra: ZimbraService,
     ) -> list[RecallCandidate]:
+        # Пересобираем также запросы, поставленные в очередь старой версией.
+        run.source_search_query = self.build_source_query(
+            sender_email=run.sender_email,
+            recipient_email=run.recipient_email,
+            sent_date=run.sent_date,
+            subject_hint=run.subject_hint,
+        )
+        self.db.commit()
         client = zimbra._client()
         try:
             output = zimbra.execute_mailbox_command(
