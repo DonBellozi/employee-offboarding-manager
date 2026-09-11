@@ -28,7 +28,17 @@
 {% if details.snapshot_state == 'pending' %}
 <div class="upcoming-details-cache-note pending">
   <strong>Фоновая проверка запланирована</strong>
-  <span>Результаты появятся здесь автоматически. Окно можно закрыть.</span>
+  <span>Ожидается первый результат. Окно можно закрыть.</span>
+</div>
+{% elif details.snapshot_state == 'refreshing' %}
+<div class="upcoming-details-cache-note pending">
+  <strong>Проверяем сведения об учетных записях</strong>
+  <span>Проверка начата {{ details.snapshot_attempt_at }}. Окно можно закрыть.</span>
+</div>
+{% elif details.snapshot_state in ['waiting_import', 'delayed'] %}
+<div class="upcoming-details-cache-note warning">
+  <strong>{{ 'Ожидаем кадровый импорт' if details.snapshot_state == 'waiting_import' else 'Фоновая проверка задерживается' }}</strong>
+  <span>{{ details.snapshot_error }}</span>
 </div>
 {% elif details.snapshot_state == 'error' %}
 <div class="upcoming-details-cache-note error">
@@ -58,9 +68,9 @@
 
 <div class="upcoming-details-cache-footer">
   {% if details.snapshot_checked_at %}
-  Проверено {{ details.snapshot_checked_at }}. Обновляется в фоне каждые 5 минут.
+  Проверено {{ details.snapshot_checked_at }}. Плановое обновление — каждые 5 минут.
   {% else %}
-  Проверка выполняется в фоне, без ожидания открытия этого окна.
+  Результата проверки пока нет. Открытие окна не запускает запросы к системам.
   {% endif %}
 </div>
 {% endif %}

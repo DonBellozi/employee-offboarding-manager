@@ -518,9 +518,10 @@ class UpcomingDismissalService:
         )
         return candidates
 
-    def list_upcoming(self, *, limit: int = 20) -> list[dict]:
+    def list_upcoming(self, *, limit: int | None = 20) -> list[dict]:
         self.ensure_primary_employment_state()
-        return self._all_candidates()[: max(1, int(limit))]
+        candidates = self._all_candidates()
+        return candidates if limit is None else candidates[: max(1, int(limit))]
 
     def get_upcoming(
         self,
