@@ -38,6 +38,7 @@ from app.services.dismissal_details_cache import DismissalDetailsSnapshotWorker
 from app.services.final_dismissal_lifecycle import FinalDismissalLifecycleWorker
 from app.services.onec_scheduler import OneCAutoImportScheduler
 from app.services.onec_sources import OneCSourceRegistryService
+from app.services.onec_import_recovery import recover_interrupted_imports
 from app.services.synology_scheduler import SynologyLifecycleScheduler
 from app.services.telegram_worker import TelegramNotificationWorker
 from app.services.techexpert_lifecycle import TechExpertLifecycleWorker
@@ -61,6 +62,7 @@ async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     ensure_compatibility_schema()
     with SessionLocal() as db:
+        recover_interrupted_imports(db)
         source_registry = OneCSourceRegistryService(settings, db)
         source_registry.ensure_primary()
         source_registry.apply_primary_to_settings()

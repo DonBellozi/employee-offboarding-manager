@@ -15,6 +15,7 @@ from app.models import OneCImportRun
 from app.models_dismissal_lifecycle import DismissalDetailsSnapshot
 from app.services.dismissal_details import DismissalDetailsService
 from app.services.upcoming_dismissals import UpcomingDismissalService
+from app.services.onec_import_recovery import PROCESS_STARTED_AT, running_import
 
 
 logger = logging.getLogger(__name__)
@@ -28,11 +29,6 @@ DELAY_SECONDS = 10 * 60
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-# Set before lifespan starts import workers. Rows from earlier processes are
-# history, not evidence that an import is still executing in this process.
-PROCESS_STARTED_AT = utcnow()
 
 
 def _aware_utc(value: datetime | None) -> datetime | None:
@@ -105,13 +101,9 @@ class DismissalDetailsCacheService:
         )
 
     def active_import(self) -> OneCImportRun | None:
-        return self.db.scalar(
-            select(OneCImportRun).where(
-                OneCImportRun.status == "running",
-                OneCImportRun.completed_at.is_(None),
-                OneCImportRun.started_at >= PROCESS_STARTED_AT,
-            ).order_by(OneCImportRun.started_at).limit(1)
-        )
+        # Same interlock as mail/lifecycle consumers. Startup recovery repairs
+        # the history once, rather than having snapshots ignore it alone.
+        return running_import(self.db)
 
     def enqueue(self, candidate: dict) -> DismissalDetailsSnapshot:
         snapshot = self._snapshot(candidate)
@@ -314,7 +306,6 @@ class DismissalDetailsSnapshotWorker:
         self.session_factory = session_factory
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
-        self._reported_old_imports: set[int] = set()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -336,17 +327,6 @@ class DismissalDetailsSnapshotWorker:
         with self.session_factory() as db:
             try:
                 cache = DismissalDetailsCacheService(self.settings, db)
-                old_imports = set(db.scalars(select(OneCImportRun.id).where(
-                    OneCImportRun.status == "running",
-                    OneCImportRun.started_at < PROCESS_STARTED_AT,
-                )))
-                unreported = old_imports - self._reported_old_imports
-                if unreported:
-                    logger.warning(
-                        "Фоновые снимки: записи импорта до запуска приложения не блокируют проверку: %s",
-                        sorted(unreported),
-                    )
-                    self._reported_old_imports.update(unreported)
                 if cache.active_import() is not None:
                     return
                 candidates = UpcomingDismissalService(
