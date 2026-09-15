@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from datetime import date, timezone
 from urllib.parse import quote_plus
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -893,14 +892,19 @@ def _journal_items(
             [],
         ).append(queue_item)
 
-    successful_final_block_runs = db.scalars(
+    # Completed records leave Upcoming immediately; publish them here in the
+    # same cycle, including today's completions, so there is no overnight gap.
+    final_block_runs = db.scalars(
         select(FinalDismissalBlockRun)
-        .where(FinalDismissalBlockRun.status == "success")
+        .where(
+            FinalDismissalBlockRun.status == "success",
+            FinalDismissalBlockRun.completed_at.is_not(None),
+        )
         .order_by(
             desc(FinalDismissalBlockRun.completed_at),
             desc(FinalDismissalBlockRun.id),
         )
-        .limit(200)
+        .limit(50)
     ).all()
     arrival_not_required_events = db.scalars(
         select(AuditLog)
@@ -908,24 +912,6 @@ def _journal_items(
         .order_by(desc(AuditLog.created_at), desc(AuditLog.id))
         .limit(50)
     ).all()
-    try:
-        local_zone = ZoneInfo(timezone_name)
-    except Exception:
-        local_zone = timezone.utc
-
-    def completed_before_today(run: FinalDismissalBlockRun) -> bool:
-        value = run.completed_at
-        if value is None:
-            return False
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.astimezone(local_zone).date() < today
-
-    final_block_runs = [
-        run
-        for run in successful_final_block_runs
-        if completed_before_today(run)
-    ][:50]
     final_block_run_ids = [item.id for item in final_block_runs]
     final_block_targets = (
         db.scalars(

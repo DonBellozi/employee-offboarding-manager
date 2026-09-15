@@ -253,26 +253,36 @@ class TechExpertLifecycleService:
             details=reason,
         )
 
-    def _mark_attention_after_send(
-        self,
-        row: TechExpertNotification,
-    ) -> None:
-        if row.status != "sent" or row.attention_state:
-            return
-        row.attention_state = "hr_active_after_notification"
-        row.attention_details = (
-            "После отправки запроса на прекращение доступа работник снова "
-            "активен в кадровом источнике. Автоматических действий нет; "
-            "нужно связаться с Техэкспертом вручную."
-        )
-        row.attention_at = utcnow()
-        row.updated_at = utcnow()
-        self._audit(
-            row,
-            action="techexpert_reactivation_attention",
-            result="attention",
-            details=row.attention_details,
-        )
+    def _resolve_legacy_return_alerts(self) -> int:
+        """Returning to HR does not request TechExpert access.
+
+        Resolve obsolete alerts, not delivery failures. Keep the original sent
+        notification and group-removal history; access requires a new request.
+        This local policy migration also runs when mail automation is disabled.
+        """
+        rows = list(self.db.scalars(select(TechExpertNotification).where(
+            TechExpertNotification.attention_state == "hr_active_after_notification",
+        )))
+        for row in rows:
+            previous_details = row.attention_details
+            row.attention_state = ""
+            row.attention_details = ""
+            row.attention_at = None
+            row.updated_at = utcnow()
+            self._audit(
+                row,
+                action="techexpert_reactivation_resolved",
+                result="resolved",
+                details=(
+                    "Предупреждение о возвращении завершено по правилам Техэксперта. "
+                    "Возвращение работника не восстанавливает доступ; при необходимости "
+                    "оператор оформляет новый запрос. Внешние действия не выполнялись. "
+                    f"Предыдущее пояснение: {previous_details or '—'}"
+                ),
+            )
+        if rows:
+            self.db.commit()
+        return len(rows)
 
     def _ensure_notification(
         self,
@@ -293,8 +303,9 @@ class TechExpertLifecycleService:
         )
         if not event_is_current:
             if row is not None:
-                if normalize(getattr(state, "status", "")) in ACTIVE_STATUSES:
-                    self._mark_attention_after_send(row)
+                # A sent termination request remains history. A return does
+                # not restore access or create an operator task; a new access
+                # request must be submitted explicitly if it is needed.
                 self._mark_cancelled(
                     row,
                     "Кадровая дата снята или работник снова активен в организации",
@@ -847,6 +858,7 @@ class TechExpertLifecycleService:
         return aware_utc(value) <= now
 
     def process(self) -> dict[str, int | str]:
+        self._resolve_legacy_return_alerts()
         group_sync: dict[str, object] = {}
         if self.source_domain and str(self.config.ad_group_dn or "").strip():
             try:

@@ -26,6 +26,35 @@
 
       const html = await response.text();
       if (currentRequest !== requestNumber) return;
+      const incoming = new DOMParser().parseFromString(html, 'text/html');
+      const identity = element => JSON.stringify([
+        element.dataset.workerKey, element.dataset.dismissalDate,
+      ]);
+      const incomingKeys = new Set(Array.from(
+        incoming.querySelectorAll('[data-upcoming-dismissal-details]'), identity
+      ));
+      const removed = Array.from(
+        host.querySelectorAll('[data-upcoming-dismissal-details]')
+      ).some(element => !incomingKeys.has(identity(element)));
+      const journal = document.querySelector('.journal-card');
+      let journalHtml = null;
+      if (removed && journal) {
+        // Publish both lists together. Do not lose the visible row if the
+        // journal request fails, or close details the operator is reading.
+        if (journal.querySelector('details[open]')) return;
+        const journalResponse = await fetch(new URL('/', window.location.origin), {
+          method: 'GET', credentials: 'same-origin', cache: 'no-store',
+          headers: {'Accept': 'text/html'},
+        });
+        if (!journalResponse.ok) throw new Error(`HTTP ${journalResponse.status}`);
+        const page = new DOMParser().parseFromString(await journalResponse.text(), 'text/html');
+        const updatedJournal = page.querySelector('.journal-card');
+        if (!updatedJournal) throw new Error('Journal unavailable');
+        journalHtml = updatedJournal.innerHTML;
+      }
+      if (currentRequest !== requestNumber) return;
+      if (journalHtml !== null && journal.querySelector('details[open]')) return;
+      if (journalHtml !== null) journal.innerHTML = journalHtml;
       host.innerHTML = html;
     } catch (_) {
       // Сохраняем текущий список: временная ошибка фонового обновления
