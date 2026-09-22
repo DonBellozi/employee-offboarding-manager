@@ -254,12 +254,13 @@ def _techexpert_journal_item(
     row: TechExpertNotification,
 ) -> dict[str, object]:
     labels = {
+        "waiting_ad": ("running", "Ожидает AD"),
         "pending": ("running", "Запланировано"),
         "deferred": ("partial", "Отложено"),
         "failed": ("failed", "Ошибка отправки"),
         "intervention": ("failed", "Требует проверки"),
         "sent": ("success", "Отправлено"),
-        "skipped": ("success", "Не требуется"),
+        "skipped": ("success", "Доступ отсутствует"),
         "cancelled": ("partial", "Отменено"),
     }
     status_key, status_label = labels.get(
@@ -433,6 +434,8 @@ def _dismissal_completion_status(techexpert_notifications, has_warnings: bool) -
     states = {row.status for row in techexpert_notifications}
     if states.intersection({"failed", "intervention"}):
         return {"status_key": "failed", "status_label": "Требует внимания: Техэксперт"}
+    if "waiting_ad" in states:
+        return {"status_key": "running", "status_label": "Ожидает AD: Техэксперт"}
     if states.intersection({"pending", "deferred"}):
         return {"status_key": "running", "status_label": "Ожидает обработки Техэксперта"}
     return {
@@ -552,7 +555,9 @@ def _completed_dismissal_journal_item(
         notification_statuses = {
             item.status for item in techexpert_notifications
         }
-        if all(item.group_removal_status in {"removed", "already_absent"} for item in techexpert_notifications):
+        if notification_statuses == {"skipped"}:
+            value = "Нет"
+        elif all(item.group_removal_status in {"removed", "already_absent"} for item in techexpert_notifications):
             value = "Доступ снят"
         elif "member" in membership_states:
             value = "Есть"
@@ -577,6 +582,7 @@ def _completed_dismissal_journal_item(
             state = "warning"
             note = "; ".join(dict.fromkeys(
                 "Действует отсрочка" if item.status == "deferred" else
+                "Ожидает AD; проверка повторится автоматически" if item.status == "waiting_ad" else
                 "Отменено по кадровым сведениям" if item.status == "cancelled" else
                 "Из группы удалён; письмо ожидает отправки"
                 if item.group_removal_status in {"removed", "already_absent"} else

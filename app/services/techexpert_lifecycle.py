@@ -6,6 +6,7 @@ import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+from ldap3.core.exceptions import LDAPCommunicationError
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -46,7 +47,7 @@ logger = logging.getLogger(__name__)
 POLL_SECONDS = 60
 RETRY_MINUTES = 15
 ACTIVE_STATUSES = {"active"}
-OPEN_STATUSES = {"pending", "deferred", "failed", "intervention"}
+OPEN_STATUSES = {"pending", "deferred", "failed", "intervention", "waiting_ad"}
 
 
 def utcnow() -> datetime:
@@ -389,10 +390,6 @@ class TechExpertLifecycleService:
             getattr(record, "corporate_email", "")
             or row.corporate_email
         )
-        if not corporate_email or email_domain(corporate_email) != self.source_domain:
-            raise TechExpertDataError(
-                "Не найден корпоративный email работника в организации Техэксперта"
-            )
 
         mappings = list(
             self.db.scalars(
@@ -431,10 +428,46 @@ class TechExpertLifecycleService:
             login = normalize(preferred.ad_login)
 
         if not guid and not login:
-            raise TechExpertDataError(
-                "Не настроено сопоставление работника с учетной записью AD"
-            )
+            guid, login = normalize(row.ad_object_guid), normalize(row.ad_login)
         return TechExpertIdentity(corporate_email, login, guid)
+
+    @staticmethod
+    def _ad_unavailable(exc: Exception) -> bool:
+        return isinstance(exc, (ConnectionError, TimeoutError, LDAPCommunicationError))
+
+    def _wait_for_ad(self, row: TechExpertNotification, exc: Exception) -> None:
+        row.status = "waiting_ad"
+        row.last_error = str(exc)[:4000]
+        row.next_attempt_at = utcnow() + timedelta(minutes=RETRY_MINUTES)
+        row.updated_at = utcnow()
+
+    def _requeue_legacy_email_errors(self) -> None:
+        rows = list(self.db.scalars(select(TechExpertNotification).where(
+            TechExpertNotification.status.in_(OPEN_STATUSES),
+            TechExpertNotification.last_error == "Не найден корпоративный email работника в организации Техэксперта",
+        )))
+        for row in rows:
+            row.status = "pending"
+            row.last_error = ""
+            row.next_attempt_at = None
+            self._audit(row, action="techexpert_email_requirement_removed", result="requeued",
+                        details="Email работника необязателен; назначена повторная проверка AD")
+        if rows:
+            self.db.commit()
+
+    def _skip_absent_access(self, row: TechExpertNotification, reason: str) -> None:
+        row.membership_state = "not_member"
+        row.status = "skipped"
+        row.last_error = ""
+        row.group_removal_error = ""
+        row.group_removal_status = "already_absent"
+        row.next_attempt_at = None
+        row.updated_at = utcnow()
+        event, _ = self._current_event_and_state(row)
+        record = self._record_for_event(event) if event else None
+        if record is not None:
+            record.techexpert_access = False
+        self._audit(row, action="techexpert_notification_skipped", result="not_member", details=reason)
 
     def _current_event_and_state(
         self,
@@ -512,6 +545,7 @@ class TechExpertLifecycleService:
         row.attempts = int(row.attempts or 0) + 1
         row.next_attempt_at = None
         row.updated_at = utcnow()
+        ad_stage = False
         try:
             identity = self._resolve_identity(row)
             row.corporate_email = identity.corporate_email
@@ -520,6 +554,13 @@ class TechExpertLifecycleService:
 
             ad = ActiveDirectoryService(self.settings)
             if row.group_removal_status not in {"removed", "already_absent"}:
+                ad_stage = True
+                user = ad.lookup_group_user(identity.ad_login, object_guid=identity.ad_object_guid, full_name=row.fio)
+                if user is None:
+                    self._skip_absent_access(row, "AD подтвердил отсутствие учётной записи; доступ отсутствует")
+                    return False
+                identity = TechExpertIdentity(identity.corporate_email, user.username, user.object_guid)
+                row.ad_login, row.ad_object_guid = identity.ad_login, identity.ad_object_guid
                 try:
                     is_member = ad.is_user_member_of_group(
                         identity.ad_login,
@@ -579,22 +620,16 @@ class TechExpertLifecycleService:
                         details="После незавершённой попытки подтверждено отсутствие в группе; письмо ещё требуется",
                     )
                 else:
-                    row.membership_state = "not_member"
-                    row.status = "skipped"
-                    row.last_error = ""
-                    row.updated_at = utcnow()
-                    self._audit(
-                        row,
-                        action="techexpert_notification_skipped",
-                        result="not_member",
-                        details="Работник не входит в группу доступа AD",
-                    )
+                    self._skip_absent_access(row, "Работник не входит в группу доступа AD")
                     return False
             # A failed SMTP attempt must not repeat the already confirmed AD
             # operation, even if the process terminates during SMTP.
             self.db.commit()
             return True
         except Exception as exc:
+            if ad_stage and self._ad_unavailable(exc):
+                self._wait_for_ad(row, exc)
+                return False
             self._mark_send_failure(row, exc)
             return False
 
@@ -623,7 +658,7 @@ class TechExpertLifecycleService:
     def _template_employee(row: TechExpertNotification) -> dict[str, str]:
         return {
             "full_name": row.fio or row.worker_key,
-            "corporate_email": row.corporate_email,
+            "corporate_email": row.corporate_email or "Не указан",
             "organization": row.source_name or row.source_id,
             "department": row.department,
             "dismissal_date": row.dismissal_date.strftime("%d.%m.%Y"),
@@ -862,6 +897,7 @@ class TechExpertLifecycleService:
 
     def process(self) -> dict[str, int | str]:
         self._resolve_legacy_return_alerts()
+        self._requeue_legacy_email_errors()
         group_sync: dict[str, object] = {}
         if self.source_domain and str(self.config.ad_group_dn or "").strip():
             try:

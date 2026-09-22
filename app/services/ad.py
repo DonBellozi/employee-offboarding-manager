@@ -498,7 +498,51 @@ class ActiveDirectoryService:
                 attributes=["distinguishedName"],
                 size_limit=1,
             )
+            self._require_group_read_success(conn)
             return bool(conn.entries)
+
+    @staticmethod
+    def _require_group_read_success(conn) -> None:
+        result = conn.result or {}
+        if result.get("result") in {51, 52}:
+            raise ConnectionError("AD временно недоступен: " + str(result))
+        if result.get("result") != 0:
+            raise RuntimeError("Не удалось проверить AD: " + str(result))
+
+    def lookup_group_user(self, username: str, *, object_guid: str = "", full_name: str = "") -> ADDirectoryUser | None:
+        """Strict lookup: only a successful empty LDAP result means absence.
+
+        Name-only matches require an explicit mapping before group mutation.
+        A disabled integration is not evidence that the account is absent.
+        """
+        if not self.settings.ad_check_enabled:
+            raise ValueError("Проверка AD отключена в настройках")
+        guid = str(object_guid or "").strip().strip("{}")
+        login = str(username or "").strip()
+        name = " ".join(str(full_name or "").split())
+        if guid:
+            clause = f"(objectGUID={escape_bytes(uuid.UUID(guid).bytes_le)})"
+        elif login:
+            clause = f"(sAMAccountName={escape_filter_chars(login)})"
+        elif len(name.split()) >= 2:
+            clause = f"(displayName={escape_filter_chars(name)})"
+        else:
+            raise ValueError("Недостаточно данных для проверки учётной записи AD")
+        with self._service_connection() as conn:
+            conn.search(self.settings.ad_base_dn,
+                        "(&(objectCategory=person)(objectClass=user)" + clause + ")",
+                        attributes=["sAMAccountName", "displayName", "mail", "userAccountControl",
+                                    "distinguishedName", "objectGUID", "accountExpires"], size_limit=2)
+            self._require_group_read_success(conn)
+            entries = list(conn.entries)
+            if not entries:
+                return None
+            if len(entries) != 1 or not (guid or login):
+                raise ValueError("Найдены кандидаты AD; требуется явное сопоставление работника")
+            user = self._entry_to_directory_user(entries[0])
+            if user is None or not user.distinguished_name:
+                raise ValueError("AD вернул неполные сведения об учётной записи")
+            return user
 
     def group_members(self, group_dn: str) -> list[ADDirectoryUser]:
         """Получить прямых пользователей группы одним сервисным bind.
