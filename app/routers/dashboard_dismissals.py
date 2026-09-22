@@ -266,6 +266,14 @@ def _techexpert_journal_item(
         row.status,
         ("running", row.status),
     )
+    if row.status == "pending":
+        status_label = (
+            "Письмо ожидает отправки"
+            if row.group_removal_status in {"removed", "already_absent"}
+            else "Ожидает удаления из группы"
+        )
+    elif row.group_removal_status == "failed" and row.status in {"failed", "intervention"}:
+        status_label = "Ошибка удаления из группы"
     membership_labels = {
         "not_checked": "Не проверено",
         "member": "Состоит в группе",
@@ -288,6 +296,7 @@ def _techexpert_journal_item(
     ]
     removal_labels = {
         "not_started": "Не выполнялось",
+        "pending": "Ожидает подтверждения",
         "removed": "Удален из группы",
         "already_absent": "Уже отсутствовал в группе",
         "failed": "Ошибка удаления из группы",
@@ -420,6 +429,18 @@ def _final_dismissal_block_journal_item(
     }
 
 
+def _dismissal_completion_status(techexpert_notifications, has_warnings: bool) -> dict[str, str]:
+    states = {row.status for row in techexpert_notifications}
+    if states.intersection({"failed", "intervention"}):
+        return {"status_key": "failed", "status_label": "Требует внимания: Техэксперт"}
+    if states.intersection({"pending", "deferred"}):
+        return {"status_key": "running", "status_label": "Ожидает обработки Техэксперта"}
+    return {
+        "status_key": "partial" if has_warnings else "success",
+        "status_label": "Завершено с предупреждениями" if has_warnings else "Завершено",
+    }
+
+
 def _completed_dismissal_journal_item(
     run: FinalDismissalBlockRun,
     targets: list[FinalDismissalBlockTarget],
@@ -531,10 +552,14 @@ def _completed_dismissal_journal_item(
         notification_statuses = {
             item.status for item in techexpert_notifications
         }
-        if "member" in membership_states:
+        if all(item.group_removal_status in {"removed", "already_absent"} for item in techexpert_notifications):
+            value = "Доступ снят"
+        elif "member" in membership_states:
             value = "Есть"
         elif membership_states == {"not_member"}:
             value = "Нет"
+        elif membership_states == {"not_checked"}:
+            value = "Не проверено"
         else:
             value = "Проверено"
         if notification_statuses <= {"sent", "skipped"}:
@@ -544,10 +569,20 @@ def _completed_dismissal_journal_item(
             {"failed", "intervention"}
         ):
             state = "error"
-            note = "Требует проверки"
+            note = "; ".join(dict.fromkeys(
+                item.group_removal_error or item.last_error or "Требует проверки"
+                for item in techexpert_notifications if item.status in {"failed", "intervention"}
+            ))
         else:
             state = "warning"
-            note = "Обработано частично"
+            note = "; ".join(dict.fromkeys(
+                "Действует отсрочка" if item.status == "deferred" else
+                "Отменено по кадровым сведениям" if item.status == "cancelled" else
+                "Из группы удалён; письмо ожидает отправки"
+                if item.group_removal_status in {"removed", "already_absent"} else
+                "Ожидает удаления из группы и отправки письма"
+                for item in techexpert_notifications if item.status not in {"sent", "skipped"}
+            ))
         set_system_row(
             "Техэксперт",
             value,
@@ -613,12 +648,7 @@ def _completed_dismissal_journal_item(
         "personal_email": personal_email,
         "mail_domain": "",
         "operator": operator,
-        "status_key": "partial" if has_warnings else "success",
-        "status_label": (
-            "Завершено с предупреждениями"
-            if has_warnings
-            else "Завершено"
-        ),
+        **_dismissal_completion_status(techexpert_notifications, has_warnings),
         "details": [
             ("ФИО", run.fio),
             ("Дата увольнения", run.dismissal_date.strftime("%d.%m.%Y")),
@@ -789,10 +819,7 @@ def _organization_dismissal_journal_item(
         "personal_email": personal_email,
         "mail_domain": "",
         "operator": "Система",
-        "status_key": "partial" if has_warnings else "success",
-        "status_label": (
-            "Завершено с предупреждениями" if has_warnings else "Завершено"
-        ),
+        **_dismissal_completion_status(techexpert_notifications, has_warnings),
         "details": [
             ("ФИО", fio),
             ("Дата увольнения", event_date.strftime("%d.%m.%Y")),

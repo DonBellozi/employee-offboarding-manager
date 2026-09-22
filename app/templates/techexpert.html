@@ -47,7 +47,7 @@
   <dl class="integration-details">
     <dt>Организация</dt><dd>{{ techexpert.source_domain or '–' }}</dd>
     <dt>Получатель</dt><dd>{{ techexpert.recipient_email or '–' }}</dd>
-    <dt>Время</dt><dd>{{ techexpert.notification_time }} ({{ app_timezone|default('часовой пояс приложения') }})</dd>
+    <dt>Регистрация и восстановление</dt><dd>{{ techexpert.notification_time }} ({{ app_timezone|default('часовой пояс приложения') }})</dd>
     <dt>Отправитель</dt>
     <dd>
       {% if sender_profile %}
@@ -103,13 +103,15 @@
                  required>
         </label>
         <label>
-          <span>Время отправки</span>
+          <span>Отправка регистрации и восстановления</span>
           <input type="time"
                  name="notification_time"
                  value="{{ techexpert.notification_time }}"
                  required>
         </label>
       </div>
+
+      <p class="muted">Увольнение: с 19:10 в назначенную дату с учётом отсрочки и контрольной выгрузки — удаление из группы, проверка результата, затем письмо Техэксперту. Утреннего времени отправки ждать не нужно.</p>
 
       <label>
           <span>DN группы доступа AD</span>

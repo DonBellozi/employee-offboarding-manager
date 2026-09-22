@@ -14,7 +14,10 @@ from app.config import Settings
 from app.models import AuditLog, EmailLoginMapping, HRSourceRecord
 from app.models_dismissals import DismissalDeferral
 from app.models_notifications import HREmploymentDismissalEvent
-from app.models_onec_sources import HREmploymentState
+from app.models_onec_sources import HREmploymentState, OneCAdditionalSource
+from app.services.blocking_window import BLOCK_TIME
+from app.services.onec_freshness import OneCSourceFreshnessService
+from app.services.onec_import_recovery import running_import
 from app.models_techexpert import (
     TechExpertNotification,
     TechExpertNotificationBatch,
@@ -29,7 +32,6 @@ from app.services.mailer import (
 from app.services.techexpert_settings import (
     build_techexpert_template_context,
     ensure_techexpert_settings,
-    parse_notification_time,
 )
 from app.services.techexpert_registration import (
     TechExpertRegistrationService,
@@ -109,37 +111,11 @@ class TechExpertLifecycleService:
             missing.append("получатель уведомлений")
         if not str(self.settings.smtp_host or "").strip():
             missing.append("SMTP_HOST")
-        try:
-            parse_notification_time(self.config.notification_time)
-        except ValueError:
-            missing.append("время отправки")
         if not str(self.config.subject or "").strip():
             missing.append("тема письма")
         if not str(self.config.body_html or "").strip():
             missing.append("шаблон письма")
         return ", ".join(missing)
-
-    def _local(self, value: datetime) -> datetime:
-        return aware_utc(value).astimezone(ZoneInfo(self.settings.app_timezone))
-
-    def _at_notification_time(self, value: date) -> datetime:
-        local = datetime.combine(
-            value,
-            parse_notification_time(self.config.notification_time),
-            tzinfo=ZoneInfo(self.settings.app_timezone),
-        )
-        return local.astimezone(timezone.utc)
-
-    def _next_notification_time(self, confirmed_at: datetime) -> datetime:
-        local_confirmation = self._local(confirmed_at)
-        candidate = datetime.combine(
-            local_confirmation.date(),
-            parse_notification_time(self.config.notification_time),
-            tzinfo=local_confirmation.tzinfo,
-        )
-        if candidate < local_confirmation:
-            candidate += timedelta(days=1)
-        return candidate.astimezone(timezone.utc)
 
     def _deferral(
         self,
@@ -164,25 +140,21 @@ class TechExpertLifecycleService:
         if dismissal_date is None:
             raise TechExpertDataError("В кадровом событии отсутствует дата увольнения")
 
-        confirmed_at = event.updated_at or event.created_at
-        confirmation_date = self._local(confirmed_at).date()
-        retroactive = (
-            normalize(state.status_reason) == "absent_from_export"
-            or dismissal_date < confirmation_date
-        )
-        if retroactive:
-            candidate = self._next_notification_time(confirmed_at)
-        else:
-            candidate = self._at_notification_time(
-                dismissal_date + timedelta(days=1)
-            )
+        effective_date = max(dismissal_date, deferral.deferred_until if deferral else dismissal_date)
+        return self._block_time(effective_date)
 
-        if deferral is not None:
-            candidate = max(
-                candidate,
-                self._at_notification_time(deferral.deferred_until),
-            )
-        return candidate
+    def _block_time(self, day: date) -> datetime:
+        return datetime.combine(day, BLOCK_TIME, tzinfo=ZoneInfo(self.settings.app_timezone)).astimezone(timezone.utc)
+
+    def _hr_ready(self) -> bool:
+        if running_import(self.db) is not None:
+            return False
+        source = next((source for source in self.db.scalars(select(OneCAdditionalSource).where(
+            OneCAdditionalSource.enabled.is_(True),
+        )) if normalize(source.source_id) == self.source_domain), None)
+        return bool(source is not None and OneCSourceFreshnessService(
+            self.settings, self.db,
+        ).source_state(source, expected_date=self.local_now.date()).ready)
 
     def _employment_state(
         self,
@@ -515,7 +487,7 @@ class TechExpertLifecycleService:
         deferral = self._deferral(row.worker_key, row.dismissal_date)
         if deferral is None:
             return False
-        deferral_time = self._at_notification_time(deferral.deferred_until)
+        deferral_time = self._block_time(max(row.dismissal_date, deferral.deferred_until))
         if deferral_time <= utcnow():
             return False
         row.status = "deferred"
@@ -527,6 +499,8 @@ class TechExpertLifecycleService:
         return True
 
     def _prepare_batch_candidate(self, row: TechExpertNotification) -> bool:
+        if not self._recheck_batch_candidate(row):
+            return False
         event, state = self._current_event_and_state(row)
         if not self._still_due(row, event, state):
             self._mark_cancelled(row, "Повторная HR-проверка отменила письмо")
@@ -560,12 +534,19 @@ class TechExpertLifecycleService:
                     # membership_state является снимком доступа до удаления и
                     # остается member для повторной отправки SMTP.
                     row.membership_state = "member"
+                    # Persist intent before touching AD. After a restart an
+                    # absent member still needs the termination email.
+                    row.group_removal_status = "pending"
+                    self.db.commit()
+                    if not self._recheck_batch_candidate(row):
+                        return False
                     try:
                         removal = ad.remove_user_from_group(
                             identity.ad_login,
                             self.config.ad_group_dn,
                             object_guid=identity.ad_object_guid,
                         )
+                        self._confirm_group_absent(ad, identity)
                     except Exception as exc:
                         row.group_removal_status = "failed"
                         row.group_removal_error = str(exc)[:4000]
@@ -589,6 +570,14 @@ class TechExpertLifecycleService:
                     # завершился до фиксации результата.
                     row.group_removal_status = "already_absent"
                     row.group_removed_at = utcnow()
+                    row.group_removal_error = ""
+                    record = self._record_for_event(event)
+                    if record is not None:
+                        record.techexpert_access = False
+                    self._audit(
+                        row, action="techexpert_group_access_removed", result="already_absent",
+                        details="После незавершённой попытки подтверждено отсутствие в группе; письмо ещё требуется",
+                    )
                 else:
                     row.membership_state = "not_member"
                     row.status = "skipped"
@@ -601,12 +590,24 @@ class TechExpertLifecycleService:
                         details="Работник не входит в группу доступа AD",
                     )
                     return False
+            # A failed SMTP attempt must not repeat the already confirmed AD
+            # operation, even if the process terminates during SMTP.
+            self.db.commit()
             return True
         except Exception as exc:
             self._mark_send_failure(row, exc)
             return False
 
+    def _confirm_group_absent(self, ad: ActiveDirectoryService, identity: TechExpertIdentity) -> None:
+        if ad.is_user_member_of_group(identity.ad_login, self.config.ad_group_dn, object_guid=identity.ad_object_guid):
+            raise RuntimeError("AD не подтвердил удаление из группы Техэксперта")
+
     def _recheck_batch_candidate(self, row: TechExpertNotification) -> bool:
+        self.db.flush()
+        self.db.expire_all()
+        if not self._hr_ready():
+            row.last_error = "Ожидает завершения импорта и свежей контрольной выгрузки организации"
+            return False
         event, state = self._current_event_and_state(row)
         if not self._still_due(row, event, state):
             self._mark_cancelled(
@@ -614,7 +615,9 @@ class TechExpertLifecycleService:
                 "Повторная HR-проверка перед SMTP отменила письмо",
             )
             return False
-        return not self._defer_if_needed(row)
+        if self._defer_if_needed(row):
+            return False
+        return self._datetime_due(self._block_time(row.dismissal_date), utcnow())
 
     @staticmethod
     def _template_employee(row: TechExpertNotification) -> dict[str, str]:
