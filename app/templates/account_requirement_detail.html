@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Решение о необходимости УЗ{% endblock %}
+{% block content %}
+<h1>Необходимость корпоративной учетной записи</h1>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+<section class="card">
+  <h2>{{ case.fio }}</h2>
+  {% for row in snapshot.placements %}<p>{{ row.organization }} · {{ row.department }} · {{ row.position }}</p>{% endfor %}
+  <p class="muted">{{ 'Кадровый снимок решения сохранен.' if case.decision_snapshot_json else 'Показаны текущие кадровые сведения; снимок будет сохранен при финальном ответе.' }} Уточнение: {{ 'да' if case.clarification_required else 'нет' }}.</p>
+  {% include "account_requirement_controls.html" %}
+  {% if case.state == 'decided' and case.decision == 'required' and not case.created_account and arrival_event_ids %}
+  <a class="button" href="/employees/new?arrival_event_ids={{ arrival_event_ids }}">Перейти к созданию / проверке учеток</a>
+  {% endif %}
+  <p class="muted">Создание учеток: {{ case.external_action_status }}. Это не обучающая метка.</p>
+</section>
+<section class="card">
+  <h2>История</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Когда</th><th>Кто</th><th>Состояние</th><th>Решение</th><th>Комментарий</th></tr></thead>
+    <tbody>{% for event in history %}<tr>
+      <td>{{ event.created_at|app_datetime }}</td><td>{{ event.actor }}</td>
+      <td>{{ state_labels.get(event.previous_state, '—') }} → {{ state_labels.get(event.new_state, event.new_state) }}</td>
+      <td>{{ decision_labels.get(event.previous_decision, '—') }} → {{ decision_labels.get(event.new_decision, '—') }}</td>
+      <td>{{ event.comment }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endblock %}

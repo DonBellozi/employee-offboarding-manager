@@ -28,6 +28,7 @@ from app.security import get_current_user, get_or_create_csrf, validate_csrf
 from app.services.ad import ActiveDirectoryService
 from app.services.blocking import BlockingService
 from app.services.employee_arrivals import EmployeeArrivalService
+from app.services.account_requirement import AccountRequirementService
 from app.services.employee_arrival_accounts import (
     EmployeeArrivalAccountService,
 )
@@ -618,6 +619,9 @@ def new_employee(
                 settings,
                 db,
             ).inspect(arrival["event_ids_value"])
+            requirement_case = AccountRequirementService(db).observe(
+                arrival["event_ids_value"], account_state,
+            )
             preferred_domain = str(arrival["preferred_domain"])
             return templates.TemplateResponse(
                 request,
@@ -642,6 +646,13 @@ def new_employee(
                     arrival_event_ids=arrival["event_ids_value"],
                     arrival_accounts=account_state,
                     force_new=force_new,
+                    requirement_case=requirement_case,
+                    requirement_snapshot=(
+                        json.loads(requirement_case.decision_snapshot_json)
+                        if requirement_case and requirement_case.decision_snapshot_json
+                        else AccountRequirementService(db).snapshot(requirement_case.worker_key)
+                        if requirement_case else None
+                    ),
                 ),
             )
         except Exception as exc:
@@ -1064,6 +1075,10 @@ def provision_employee(
     user = get_current_user(request)
     login = login.strip().lower()
     personal_email = personal_email.strip()
+    requirement_case_id = None
+    requirement_action_started = False
+    requirement_case = None
+    account_state = None
 
     try:
         from email_validator import EmailNotValidError, validate_email
@@ -1074,6 +1089,16 @@ def provision_employee(
             # внешними действиями: исчезнувший или уже обработанный эпизод
             # не должен запустить создание учетных записей.
             arrival_service.registration_context(arrival_event_ids)
+            account_state = EmployeeArrivalAccountService(settings, db).inspect(arrival_event_ids)
+            if account_state.get("errors"):
+                raise ValueError("Проверка AD/Zimbra не завершена. Повторите проверку перед созданием")
+            requirement_service = AccountRequirementService(db)
+            case = requirement_service.observe(arrival_event_ids, account_state)
+            requirement_case = case
+            if not account_state.get("has_candidates"):
+                if case is None or case.state != "decided" or case.decision != "required":
+                    raise ValueError("Сначала сохраните решение «Учетная запись нужна»")
+                requirement_case_id = case.id
 
         if not LOGIN_RE.fullmatch(login):
             raise ValueError("Логин должен начинаться с латинской буквы и содержать не более 20 символов")
@@ -1114,7 +1139,10 @@ def provision_employee(
             login=login,
             mail_domain=mail_domain,
         )
+        requirement_action_started = True
         credentials = ProvisioningService(settings).provision(db, user.username, data)
+        if requirement_case_id is not None:
+            AccountRequirementService(db).record_external_result(requirement_case_id, credentials)
         if (
             arrival_event_ids.strip()
             and credentials.ad_created
@@ -1160,6 +1188,9 @@ def provision_employee(
         response.headers["Pragma"] = "no-cache"
         return response
     except Exception as exc:
+        if requirement_case_id is not None and requirement_action_started:
+            db.rollback()
+            AccountRequirementService(db).record_external_result(requirement_case_id, failed=True)
         parsed = type(
             "Parsed",
             (),
@@ -1187,6 +1218,11 @@ def provision_employee(
                     confirm_no_personal_email.strip().lower() == "true"
                 ),
                 arrival_event_ids=arrival_event_ids,
+                arrival_accounts=account_state,
+                requirement_case=requirement_case,
+                requirement_snapshot=(json.loads(requirement_case.decision_snapshot_json
+                                                or requirement_case.initial_snapshot_json)
+                                      if requirement_case else None),
             ),
             status_code=400,
         )

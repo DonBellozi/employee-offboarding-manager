@@ -275,6 +275,19 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
 </section>
 {% endif %}
 
+{% if requirement_case|default(None) and requirement_case.state != 'cancelled' %}
+<section class="card">
+  <h2>Необходимость корпоративной учетной записи</h2>
+  <p>{{ requirement_case.fio }}</p>
+  {% for placement in requirement_snapshot.placements %}
+  <p>{{ placement.organization }} · {{ placement.department }} · {{ placement.position }}</p>
+  {% endfor %}
+  {% set case = requirement_case %}
+  {% include "account_requirement_controls.html" %}
+</section>
+{% endif %}
+
+{% if not arrival_event_ids|default('') or (arrival_accounts|default(None) and arrival_accounts.has_candidates) or (requirement_case|default(None) and requirement_case.state == 'decided' and requirement_case.decision == 'required') %}
 <form method="post" action="/employees/provision" class="stack" id="provision-form">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids|default('') }}">
@@ -1076,5 +1089,6 @@ runLoginCheck().then(result => {
   checkCandidatePool();
 });
 </script>
+{% endif %}
 {% endif %}
 {% endblock %}

@@ -73,13 +73,7 @@
            data-workspace-modal
            data-workspace-title="Проверка учётных записей"
            data-workspace-refresh="true">Проверить учётки</a>
-        <form method="post" action="/employees/arrivals/not-required" class="inline">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <input type="hidden" name="arrival_event_ids" value="{{ item.event_ids_value }}">
-          <button class="button secondary"
-                  type="submit"
-                  title="Скрыть только этот эпизод занятости. При повторном появлении уведомление возникнет снова.">Не требуется</button>
-        </form>
+        <span class="muted">Решение о необходимости УЗ — после проверки</span>
       </div>
     </article>
     {% endfor %}

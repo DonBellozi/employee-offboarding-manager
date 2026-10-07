@@ -10,6 +10,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import get_settings
 from app.db import Base, SessionLocal, engine, ensure_compatibility_schema
 from app.routers import (
+    account_requirement,
     admin,
     auth,
     employees,
@@ -33,6 +34,7 @@ from app.routers import (
 )
 from app.security import CSRFMismatchError, ensure_bootstrap_admin
 from app.services.blocking_worker import BlockingQueueWorker
+from app.services.account_requirement_worker import AccountRequirementWorker
 from app.services.dismissal_notifications import DismissalNotificationWorker
 from app.services.dismissal_details_cache import DismissalDetailsSnapshotWorker
 from app.services.final_dismissal_lifecycle import FinalDismissalLifecycleWorker
@@ -99,6 +101,7 @@ async def lifespan(_: FastAPI):
         SessionLocal,
     )
     techexpert_worker = TechExpertLifecycleWorker(settings, SessionLocal)
+    account_requirement_worker = AccountRequirementWorker(settings, SessionLocal)
     onec_scheduler.start()
     blocking_worker.start()
     dismissal_notification_worker.start()
@@ -110,9 +113,11 @@ async def lifespan(_: FastAPI):
     zimbra_mail_cleanup_scheduler.start()
     zimbra_employment_worker.start()
     techexpert_worker.start()
+    account_requirement_worker.start()
     try:
         yield
     finally:
+        account_requirement_worker.stop()
         techexpert_worker.stop()
         zimbra_employment_worker.stop()
         zimbra_mail_cleanup_scheduler.stop()
@@ -137,6 +142,7 @@ app.add_middleware(
 )
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(auth.router)
+app.include_router(account_requirement.router)
 app.include_router(hr_registry_multisource.router)
 app.include_router(hr_registry_alias.router)
 app.include_router(hr_registry_mapping.router)

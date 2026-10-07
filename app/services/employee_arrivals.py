@@ -9,6 +9,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.models import AuditLog, HRSourceRecord
+from app.models_account_requirement import AccountRequirementCase  # register additive tables at startup
 from app.models_employee_arrivals import (
     HREmploymentArrivalEvent,
     HREmploymentArrivalSourceState,
@@ -428,4 +429,12 @@ class EmployeeArrivalService:
                 ),
             )
         )
+        from app.services.account_requirement import AccountRequirementService
+        requirement_service = AccountRequirementService(self.db)
+        case = requirement_service.find(context["event_ids"])
+        if case is not None and (
+            provisioning_operation_id is None
+            or case.provisioning_operation_id != provisioning_operation_id
+        ):
+            requirement_service.cancel(case, "Приняты или восстановлены существующие учетки", actor=operator)
         self.db.commit()

@@ -55,6 +55,7 @@
              title="Удаление ошибочно отправленного письма">Отзыв</a>
           {% endif %}
           {% if user.role == 'admin' %}
+          <a href="/admin/account-requirements">Решения об УЗ</a>
           <a class="settings-link" href="/settings">Настройки</a>
           {% elif user.role == 'operator' %}
           <a class="settings-link" href="/settings/techexpert">Настройки ТЭ</a>

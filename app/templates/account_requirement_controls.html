@@ -1,0 +1,28 @@
+<p>
+  {% if case.state == 'pending' %}Решение не принято
+  {% elif case.state == 'clarification' %}Требуется уточнение необходимости учетной записи
+  {% elif case.state == 'cancelled' %}Случай отменен
+  {% else %}Учетная запись {{ 'нужна' if case.decision == 'required' else 'не нужна' }} · {{ case.decided_by }}{% endif %}
+</p>
+{% if case.state != 'cancelled' and (not case.decided_by or case.decided_by == user.username or user.role == 'admin') %}
+<form method="post" action="/employees/account-requirements/{{ case.id }}/decision" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="revision" value="{{ case.revision }}">
+  <label>Комментарий оператора — необязательно
+    <textarea name="comment" rows="2" maxlength="4000">{{ case.comment }}</textarea>
+  </label>
+  <div class="actions">
+    <button type="submit" name="action" value="required">Учетная запись нужна</button>
+    {% if case.state != 'decided' %}
+    <button class="button secondary" type="submit" name="action" value="clarification">Требуется уточнение</button>
+    {% endif %}
+    <button class="button secondary" type="submit" name="action" value="not_required">Учетная запись не нужна</button>
+    {% if user.role == 'admin' %}
+    <button class="button secondary" type="submit" name="action" value="cancelled">Отменить ошибочный случай</button>
+    {% endif %}
+  </div>
+  <label><input type="checkbox" name="confirmed" value="true"> Подтверждаю решение «Учетная запись не нужна»</label>
+  <p class="muted">Решение сохраняется отдельно от результата создания. Исправление не удаляет уже созданные учетки.</p>
+</form>
+{% endif %}
+<a href="/account-requirements/{{ case.id }}">История решения</a>

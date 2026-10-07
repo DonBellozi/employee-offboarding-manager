@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Решения о необходимости УЗ{% endblock %}
+{% block content %}
+<div class="heading-row"><h1>Решения о необходимости УЗ</h1>
+  <a class="button secondary" href="/admin/account-requirements-export">Выгрузить датасет JSON</a>
+</div>
+<section class="card">
+  <form method="get" class="grid two">
+    <label>Статус<select name="state"><option value="">Все</option>{% for key, label in state_labels.items() %}<option value="{{ key }}" {% if filters.state == key %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label>Решение<select name="decision"><option value="">Все</option>{% for key, label in decision_labels.items() %}<option value="{{ key }}" {% if filters.decision == key %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label>Организация<input name="organization" value="{{ filters.organization }}"></label>
+    <label>Подразделение<input name="department" value="{{ filters.department }}"></label>
+    <label>Должность<input name="position" value="{{ filters.position }}"></label>
+    <label>С даты<input type="date" name="date_from" value="{{ filters.date_from }}"></label>
+    <label>По дату<input type="date" name="date_to" value="{{ filters.date_to }}"></label>
+    <button type="submit">Показать</button>
+  </form>
+</section>
+<section class="card">
+  <p>Найдено: {{ rows|length }}. Экспорт включает все действующие финальные решения, независимо от фильтров.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Сотрудник</th><th>Организация / подразделение / должность</th><th>Статус</th><th>Решение</th><th>Уточнение</th><th>Оператор</th><th>Дата</th></tr></thead>
+    <tbody>{% for item in rows %}{% set case = item.case %}<tr>
+      <td><a href="/account-requirements/{{ case.id }}">{{ case.fio }}</a></td>
+      <td>{% for row in item.placements %}<div>{{ row.organization }} · {{ row.department }} · {{ row.position }}</div>{% endfor %}</td>
+      <td>{{ state_labels.get(case.state, case.state) }}</td><td>{{ decision_labels.get(case.decision, '—') }}</td>
+      <td>{{ 'Да' if case.clarification_required else 'Нет' }}</td><td>{{ case.decided_by or '—' }}</td>
+      <td>{{ (case.decided_at or case.created_at)|app_datetime }}</td>
+    </tr>{% else %}<tr><td colspan="7">Решений пока нет</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endblock %}

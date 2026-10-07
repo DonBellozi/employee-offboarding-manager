@@ -96,7 +96,16 @@ class EmployeeArrivalAccountService:
                 )
             ).all()
         )
-        records: list[HRSourceRecord] = list(context["records"])
+        # Accounts in another active organization are also reusable for this person.
+        records: list[HRSourceRecord] = list(self.db.scalars(select(HRSourceRecord).where(
+            HRSourceRecord.worker_key == context["worker_key"], HRSourceRecord.is_present.is_(True),
+        )).all())
+        context["corporate_emails"] = list(dict.fromkeys(
+            record.corporate_email.strip().lower() for record in records if record.corporate_email.strip()
+        ))
+        context["logins"] = list(dict.fromkeys(
+            record.login.strip().lower() for record in records if record.login.strip()
+        ))
         ad_candidates: dict[str, ADDirectoryUser] = {}
         zimbra_candidates: dict[str, ZimbraAccountIdentity] = {}
         errors: list[str] = []

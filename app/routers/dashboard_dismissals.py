@@ -1543,19 +1543,19 @@ def mark_employee_arrival_not_required(
     arrival_event_ids: str = Form(...),
     csrf: str = Form(...),
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ):
     validate_csrf(request, csrf)
     user = get_current_user(request)
     try:
-        result = EmployeeArrivalService(db).mark_not_required(
-            arrival_event_ids,
-            operator=user.username,
-        )
-        message = f"Для {result['fio']} регистрация отмечена как ненужная"
-        return RedirectResponse(
-            f"/?employee_message={quote_plus(message)}#new-employees",
-            status_code=303,
-        )
+        # Legacy form/link must not bypass identity discovery or create false labels.
+        from app.services.account_requirement import AccountRequirementService
+        from app.services.employee_arrival_accounts import EmployeeArrivalAccountService
+        state = EmployeeArrivalAccountService(settings, db).inspect(arrival_event_ids)
+        case = AccountRequirementService(db).observe(arrival_event_ids, state)
+        if case is None:
+            raise ValueError("Сначала проверьте существующие учетные записи работника")
+        return RedirectResponse(f"/account-requirements/{case.id}", status_code=303)
     except Exception as exc:
         db.rollback()
         return RedirectResponse(
