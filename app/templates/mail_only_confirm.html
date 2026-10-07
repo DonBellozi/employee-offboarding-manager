@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Создать недостающую почту{% endblock %}
+{% block content %}
+<h1>Почта для существующей AD</h1>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+{% if prepared %}
+<section class="card">
+  <h2>{{ prepared.context.fio }}</h2>
+  <form method="get" class="stack">
+    <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids }}">
+    <input type="hidden" name="ad_login" value="{{ prepared.user.username }}">
+    <div class="grid two">
+      <label>Организация<select name="source_id">
+        {% for record in prepared.context.records %}<option value="{{ record.source_id }}" {% if record.source_id == prepared.source_id %}selected{% endif %}>{{ record.source_name or record.source_id }}</option>{% endfor %}
+      </select></label>
+      <label>Почтовый домен<select name="mail_domain">
+        {% for domain in prepared.domains %}<option value="{{ domain }}" {% if domain == prepared.domain %}selected{% endif %}>{{ domain }}</option>{% endfor %}
+      </select></label>
+    </div>
+    <button class="button secondary" type="submit">Проверить параметры</button>
+  </form>
+  <p>AD: <strong>{{ prepared.user.username }}</strong> — {{ 'активна' if prepared.user.is_enabled and not prepared.user.is_expired else 'будет восстановлена' }}.</p>
+  <p>Новый ящик: <strong>{{ prepared.email }}</strong></p>
+  {% if prepared.aliases %}<p class="muted">Алиасы: {{ prepared.aliases|join(', ') }}</p>{% endif %}
+  <p class="muted">Логин и пароль AD сохраняются. Новый пароль будет только у почты.
+    Реквизиты отправятся на {{ prepared.record.personal_email or prepared.email }} и появятся на итоговом экране.
+    Операция относится только к выбранной организации.</p>
+  {% if dry_run %}<div class="alert warning">DRY_RUN: реальные изменения и отправка письма не выполняются.</div>{% endif %}
+  <form method="post" class="stack" id="mail-only-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids }}">
+    <input type="hidden" name="ad_login" value="{{ prepared.user.username }}">
+    <input type="hidden" name="ad_object_guid" value="{{ prepared.user.object_guid }}">
+    <input type="hidden" name="source_id" value="{{ prepared.source_id }}">
+    <input type="hidden" name="mail_domain" value="{{ prepared.domain }}">
+    <button type="submit">{{ 'Восстановить AD и создать почту' if not prepared.user.is_enabled or prepared.user.is_expired else 'Создать почту' }}</button>
+  </form>
+</section>
+{% endif %}
+<a class="button secondary" href="/employees/new?arrival_event_ids={{ arrival_event_ids }}" data-workspace-navigate>Вернуться к проверке учеток</a>
+<script>
+document.getElementById('mail-only-form')?.addEventListener('submit', event => {
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  if (button) { button.disabled = true; button.textContent = 'Выполняется…'; }
+});
+</script>
+{% endblock %}

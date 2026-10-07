@@ -24,11 +24,12 @@ from app.models import (
     ProvisioningOperation,
 )
 from app.time_utils import register_datetime_filters
-from app.security import get_current_user, get_or_create_csrf, validate_csrf
+from app.security import get_current_user, get_or_create_csrf, require_operator, validate_csrf
 from app.services.ad import ActiveDirectoryService
 from app.services.blocking import BlockingService
 from app.services.employee_arrivals import EmployeeArrivalService
 from app.services.account_requirement import AccountRequirementService
+from app.services.arrival_missing_mail import ArrivalMissingMailService
 from app.services.employee_arrival_accounts import (
     EmployeeArrivalAccountService,
 )
@@ -88,7 +89,8 @@ def _provisioning_journal_item(operation: ProvisioningOperation) -> dict[str, ob
         "kind": "provision",
         "record_id": operation.id,
         "created_at": operation.created_at,
-        "action": "Создание учетных записей",
+        "action": ("Создание почты для существующей AD"
+                   if operation.operation_kind == "mail_only" else "Создание учетных записей"),
         "subject": full_name,
         "login": operation.login,
         "corporate_email": operation.corporate_email,
@@ -104,6 +106,7 @@ def _provisioning_journal_item(operation: ProvisioningOperation) -> dict[str, ob
             ("Личный адрес", operation.personal_email),
             ("Почтовый домен", operation.mail_domain),
             ("Учетная запись AD создана", _yes_no(operation.ad_created)),
+            *([("Использована существующая AD", "Да")] if operation.operation_kind == "mail_only" else []),
             ("Учетная запись AD включена", _yes_no(operation.ad_enabled)),
             ("Ящик Zimbra создан", _yes_no(operation.zimbra_created)),
             (
@@ -116,7 +119,8 @@ def _provisioning_journal_item(operation: ProvisioningOperation) -> dict[str, ob
             ),
             (
                 "Реквизиты AD отправлены на корпоративную почту",
-                _yes_no(operation.corporate_mail_sent),
+                ("Не требуется: пароль существующей AD не изменялся"
+                 if operation.operation_kind == "mail_only" else _yes_no(operation.corporate_mail_sent)),
             ),
         ],
         "error_message": operation.error_message,
@@ -852,6 +856,51 @@ def create_missing_arrival_ad(
             ),
             status_code=400,
         )
+
+
+@router.get("/employees/arrivals/accounts/create-missing-mail")
+def create_missing_arrival_mail_form(
+    request: Request, arrival_event_ids: str, ad_login: str, source_id: str = "", mail_domain: str = "",
+    db: Session = Depends(get_db), settings: Settings = Depends(get_settings),
+):
+    require_operator(request)
+    try:
+        prepared = ArrivalMissingMailService(settings, db).prepare(
+            raw_event_ids=arrival_event_ids, ad_login=ad_login, source_id=source_id, mail_domain=mail_domain)
+        error = ""
+    except Exception as exc:
+        db.rollback()
+        prepared, error = None, str(exc)
+    return templates.TemplateResponse(request, "mail_only_confirm.html", _context(request,
+        prepared=prepared, error=error, arrival_event_ids=arrival_event_ids, ad_login=ad_login,
+        dry_run=settings.dry_run), status_code=400 if error else 200)
+
+
+@router.post("/employees/arrivals/accounts/create-missing-mail")
+def create_missing_arrival_mail(
+    request: Request, arrival_event_ids: str = Form(...), ad_login: str = Form(...),
+    ad_object_guid: str = Form(...), source_id: str = Form(...), mail_domain: str = Form(...),
+    csrf: str = Form(...), db: Session = Depends(get_db), settings: Settings = Depends(get_settings),
+):
+    user = require_operator(request)
+    validate_csrf(request, csrf)
+    if not ad_object_guid.strip():
+        return RedirectResponse("/employees/new?" + "arrival_event_ids=" + quote_plus(arrival_event_ids)
+            + "&account_error=" + quote_plus("Откройте форму создания почты заново: отсутствует objectGUID"), status_code=303)
+    try:
+        credentials = ArrivalMissingMailService(settings, db).create(
+            raw_event_ids=arrival_event_ids, ad_login=ad_login, expected_guid=ad_object_guid,
+            source_id=source_id, mail_domain=mail_domain, actor=user.username)
+        response = templates.TemplateResponse(request, "mail_only_result.html", _context(request,
+            credentials=credentials, arrival_event_ids=arrival_event_ids))
+    except Exception as exc:
+        db.rollback()
+        response = templates.TemplateResponse(request, "mail_only_confirm.html", _context(request,
+            prepared=None, error=str(exc), arrival_event_ids=arrival_event_ids, ad_login=ad_login,
+            dry_run=settings.dry_run), status_code=400)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @router.post("/employees/parse")

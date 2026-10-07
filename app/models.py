@@ -59,6 +59,7 @@ class DomainMailProfile(Base):
 class ProvisioningOperation(Base):
     __tablename__ = "provisioning_operations"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    operation_kind: Mapped[str] = mapped_column(String(32), default="full")
     operator_username: Mapped[str] = mapped_column(String(256), index=True)
     last_name: Mapped[str] = mapped_column(String(128))
     first_name: Mapped[str] = mapped_column(String(128))

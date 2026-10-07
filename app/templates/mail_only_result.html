@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Результат создания почты{% endblock %}
+{% block content %}
+<h1>Почта для существующей AD</h1>
+{% if credentials.warnings %}<div class="alert warning"><ul>{% for warning in credentials.warnings %}<li>{{ warning }}</li>{% endfor %}</ul></div>
+{% else %}<div class="alert success">Почта создана, существующая AD активна, сопоставление сохранено.</div>{% endif %}
+<section class="card">
+  <h2>{{ credentials.full_name }}</h2>
+  <div class="state-grid">
+    <span>AD</span><strong>{{ credentials.ad_login }} — {{ 'активна' if credentials.ad_enabled else 'проверьте состояние' }}</strong>
+    <span>Почта</span><strong>{{ credentials.corporate_email }} — {{ 'создана' if credentials.zimbra_created else 'создание не подтверждено' }}</strong>
+    <span>Реквизиты почты</span><strong>{{ 'отправлены на ' ~ credentials.recipient if credentials.credentials_mail_sent else 'не отправлены' }}</strong>
+    <span>Уведомление о возвращении</span><strong>{{ 'обработано' if credentials.arrival_resolved else 'осталось открытым' }}</strong>
+  </div>
+</section>
+{% if credentials.zimbra_created %}
+<section class="card credentials">
+  <h2>Новые реквизиты почты</h2>
+  <p>Адрес: <code>{{ credentials.corporate_email }}</code></p>
+  <p>Пароль почты: <code>{{ credentials.mail_password }}</code></p>
+  <p class="muted">Сохраните пароль с этого экрана: в журнале и базе он не хранится.</p>
+</section>
+{% endif %}
+<p class="muted">Существующая AD не удалялась и не создавалась заново. Ее пароль не изменялся и не считывался.</p>
+{% if not credentials.arrival_resolved %}<a class="button secondary" href="/employees/new?arrival_event_ids={{ arrival_event_ids }}" data-workspace-navigate>Повторно проверить учетки</a>{% endif %}
+{% endblock %}

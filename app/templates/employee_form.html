@@ -61,10 +61,14 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
 {% elif arrival_accounts|default(None) and arrival_accounts.has_candidates and not force_new|default(false) %}
 <section class="card">
   <h2>
-    {{ 'Найден только почтовый ящик' if arrival_accounts.mail_only else 'Найдены существующие учётные записи' }}
+    {{ 'Найден только почтовый ящик' if arrival_accounts.mail_only else 'Найдена только AD, почта отсутствует' if arrival_accounts.ad_only|default(false) else 'Найдены существующие учётные записи' }}
   </h2>
   <p>
-    {% if arrival_accounts.mail_only %}
+    {% if arrival_accounts.ad_only|default(false) %}
+    У {{ arrival_accounts.fio }} сохранилась AD, но почтовый ящик не найден.
+    Можно создать только недостающую почту и при необходимости восстановить AD.
+    Удалять старую AD или создавать новый логин не нужно.
+    {% elif arrival_accounts.mail_only %}
     У {{ arrival_accounts.fio }} сохранился корпоративный почтовый ящик, но
     учетная запись AD не найдена. Можно создать только недостающую AD либо
     выбрать другую существующую учетную запись.
@@ -122,6 +126,21 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
 
 <section class="card">
   <h2>{{ 'Выбрать существующую AD' if arrival_accounts.mail_only else 'Выбор оператора' }}</h2>
+  {% if arrival_accounts.ad_only|default(false) and not arrival_accounts.errors %}
+  {% if arrival_accounts.create_missing_mail_url %}
+  <div class="actions"><a class="button" href="{{ arrival_accounts.create_missing_mail_url }}" data-workspace-navigate>{{ arrival_accounts.create_missing_mail_label }}</a></div>
+  {% else %}
+  <form method="get" action="/employees/arrivals/accounts/create-missing-mail" class="stack">
+    <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids }}">
+    <label>Выберите существующую AD<select name="ad_login" required>
+      <option value="">Выберите учетную запись</option>
+      {% for item in arrival_accounts.ad_candidates %}<option value="{{ item.username }}">{{ item.username }} — {{ item.display_name }}</option>{% endfor %}
+    </select></label>
+    <button type="submit">Создать недостающую почту</button>
+  </form>
+  {% endif %}
+  <details><summary>Сопоставить другой уже существующий ящик</summary>
+  {% endif %}
   <form method="post"
         action="/employees/arrivals/accounts/resolve"
         class="stack">
@@ -197,6 +216,7 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
     </a>
   </div>
   {% endif %}
+  {% if arrival_accounts.ad_only|default(false) and not arrival_accounts.errors %}</details>{% endif %}
 </section>
 
 <section class="card">

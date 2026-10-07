@@ -49,6 +49,11 @@ def ensure_compatibility_schema() -> None:
     with engine.begin() as connection:
         add_missing_columns(
             connection,
+            "provisioning_operations",
+            {"operation_kind": "VARCHAR(32) NOT NULL DEFAULT 'full'"},
+        )
+        add_missing_columns(
+            connection,
             "zimbra_mail_recall_runs",
             {
                 "batch_id": "INTEGER NOT NULL DEFAULT 0",

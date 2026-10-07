@@ -186,6 +186,7 @@ class EmployeeArrivalAccountService:
                         *context["logins"],
                         *(mapping.ad_login for mapping in mappings),
                         *(mapping.zimbra_email for mapping in mappings),
+                        *(user.username for user in ad_candidates.values()),
                     ]
                     if normalize_email(value)
                 }
@@ -215,6 +216,7 @@ class EmployeeArrivalAccountService:
                             *context["corporate_emails"],
                             *(mapping.source_email for mapping in mappings),
                             *(mapping.zimbra_email for mapping in mappings),
+                            *(user.email for user in ad_candidates.values()),
                             *(
                                 f"{login}@{domain}"
                                 for login in sorted(known_logins)
@@ -255,6 +257,7 @@ class EmployeeArrivalAccountService:
             zimbra_rows[0] if len(zimbra_rows) == 1 else None
         )
         mail_only = bool(selected_zimbra is not None and not ad_rows)
+        ad_only = bool(ad_rows and not zimbra_rows)
         can_create_missing_ad = bool(
             mail_only
             and self.settings.ad_check_enabled
@@ -290,6 +293,18 @@ class EmployeeArrivalAccountService:
             "pair_active": pair_active,
             "pair_restorable": pair_restorable,
             "mail_only": mail_only,
+            "ad_only": ad_only,
+            "create_missing_mail_url": (
+                "/employees/arrivals/accounts/create-missing-mail?"
+                + urlencode({"arrival_event_ids": context["event_ids_value"],
+                             "ad_login": selected_ad["username"]})
+                if ad_only and selected_ad is not None and not errors else ""
+            ),
+            "create_missing_mail_label": (
+                "Восстановить AD и создать почту"
+                if selected_ad is not None and selected_ad["status"] != "active"
+                else "Создать недостающую почту"
+            ),
             "create_missing_ad_url": (
                 "/employees/arrivals/accounts/create-missing-ad?"
                 + urlencode(
