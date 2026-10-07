@@ -502,6 +502,36 @@
   width: 1%;
   min-width: 132px;
 }
+.upcoming-equipment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  padding: 3px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: .8rem;
+  line-height: 1.35;
+}
+.upcoming-equipment.present,
+.upcoming-equipment.error {
+  border-color: #fcd34d;
+  background: #fffbeb;
+  color: #92400e;
+}
+.upcoming-equipment.present::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #d97706;
+}
+.upcoming-preliminary .upcoming-equipment {
+  border-style: dashed;
+}
 .upcoming-actions {
   display: grid;
   justify-items: end;

@@ -26,6 +26,10 @@
             {% if item.login %}<code>{{ item.login }}</code>{% endif %}
             {% if item.email %}<span>{{ item.email }}</span>{% endif %}
           </div>
+          {% if item.equipment_summary is defined %}
+          <span class="upcoming-equipment {{ item.equipment_summary.state }}"
+                title="{{ item.equipment_summary.title }}">{{ item.equipment_summary.label }}</span>
+          {% endif %}
         </td>
         <td>
           <strong>{{ item.dismissal_date.strftime('%d.%m.%Y') }}</strong>

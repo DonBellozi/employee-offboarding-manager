@@ -1306,6 +1306,7 @@ def dashboard(
     dashboard_today = upcoming_service.today
     try:
         upcoming = upcoming_service.list_upcoming(limit=20)
+        DismissalDetailsCacheService(settings, db).attach_equipment_summaries(upcoming)
     except Exception as exc:
         db.rollback()
         upcoming = []
@@ -1417,6 +1418,7 @@ def upcoming_dismissals_fragment(
             settings,
             db,
         ).list_upcoming(limit=20)
+        DismissalDetailsCacheService(settings, db).attach_equipment_summaries(upcoming)
         dismissal_error = error
     except Exception as exc:
         db.rollback()

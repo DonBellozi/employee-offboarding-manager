@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import threading
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -170,7 +171,7 @@ class DismissalDetailsCacheService:
         return value.astimezone(zone).strftime("%d.%m.%Y %H:%M")
 
     @staticmethod
-    def _valid_rows(payload_json: str) -> list[dict[str, str]]:
+    def _valid_rows(payload_json: str) -> list[dict[str, object]]:
         try:
             payload = json.loads(payload_json or "{}")
         except (TypeError, json.JSONDecodeError):
@@ -192,7 +193,71 @@ class DismissalDetailsCacheService:
                     "note": str(row.get("note") or ""),
                 }
             )
+            # Optional, backward-compatible metadata for the list indicator.
+            count = row.get("equipment_count")
+            if (row.get("label") == "IT Invent" and row.get("state") in {"success", "neutral"}
+                    and type(count) is int and count >= 0):
+                result[-1]["equipment_count"] = count
+                result[-1]["equipment_stale"] = row.get("equipment_stale") is True
         return result
+
+    def attach_equipment_summaries(self, candidates: list[dict]) -> None:
+        """Annotate the UI in one local SELECT, without enqueueing/live checks."""
+        if not candidates:
+            return
+        snapshots = {
+            (snapshot.worker_key, snapshot.dismissal_date): snapshot
+            for snapshot in self.db.scalars(
+                select(DismissalDetailsSnapshot).where(
+                    DismissalDetailsSnapshot.worker_key.in_({item["worker_key"] for item in candidates}),
+                    DismissalDetailsSnapshot.dismissal_date.in_({item["dismissal_date"] for item in candidates}),
+                )
+            )
+        }
+        now = utcnow()
+        for candidate in candidates:
+            snapshot = snapshots.get((candidate["worker_key"], candidate["dismissal_date"]))
+            rows = self._valid_rows(snapshot.payload_json) if snapshot else []
+            row = next((item for item in rows if item["label"] == "IT Invent"), {})
+            count = row.get("equipment_count")
+            # Read existing version-1 snapshots immediately, before the next refresh.
+            if count is None and row.get("state") in {"success", "neutral"}:
+                value = row.get("value", "")
+                match = re.fullmatch(r"Есть\s*[—–-]\s*([0-9]{1,9})\s*шт\.", value)
+                if match:
+                    count = int(match[1])
+                elif value == "Отсутствует":
+                    count = 0
+            checked_at = _aware_utc(snapshot.checked_at) if snapshot else None
+            stale = count is not None and (
+                not snapshot or snapshot.status != "ready"
+                or snapshot.candidate_fingerprint != self.candidate_fingerprint(candidate)
+                or not checked_at or now - checked_at >= timedelta(seconds=DELAY_SECONDS)
+                or row.get("equipment_stale") is True
+                or "последний успешный результат" in row.get("note", "").lower()
+            )
+            state = "unknown"
+            label = "Оборудование: не проверено"
+            if count is not None:
+                state = "present" if count else "empty"
+                label = f"Оборудование · {count}" if count else "Оборудования нет"
+                if stale:
+                    label += " · устарело"
+            elif row.get("state") == "error" or (snapshot and snapshot.status == "error"):
+                state, label = "error", "Оборудование: ошибка проверки"
+            elif row:
+                label = "Оборудование: нет данных"
+            note = str(row.get("note") or row.get("value")
+                       or (snapshot.last_error if snapshot else "")
+                       or "Фоновая проверка ещё не завершена")
+            if checked_at:
+                note += f". Снимок: {self._format_datetime(checked_at)}"
+            if stale:
+                note += ". Последние сохранённые сведения; ожидается фоновое обновление"
+            candidate["equipment_summary"] = {
+                "state": state, "label": label, "count": count, "stale": bool(stale),
+                "title": f"IT Invent: {note}. Подробнее — в «Подробностях»",
+            }
 
     def refresh(self, candidate: dict) -> DismissalDetailsSnapshot:
         attempt_at = utcnow()

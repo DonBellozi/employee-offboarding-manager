@@ -209,7 +209,7 @@ class DismissalDetailsService:
             self.db.rollback()
             return None, str(exc)
 
-    def _itinvent(self, card: BlockingCard | None, error: str) -> dict[str, str]:
+    def _itinvent(self, card: BlockingCard | None, error: str) -> dict[str, object]:
         if card is None:
             return self._row("IT Invent", "Не проверено", state="warning", note=error)
         if card.itinvent_state in {"found", "stale"} and card.itinvent is not None:
@@ -222,14 +222,16 @@ class DismissalDetailsService:
                 note = " · ".join(
                     part for part in (note, f"Проверено {card.itinvent_checked_at}") if part
                 )
-            return self._row(
-                "IT Invent",
-                value,
-                state="success" if count else "neutral",
-                note=note,
-            )
+            return {
+                **self._row(
+                    "IT Invent", value,
+                    state="success" if count else "neutral", note=note,
+                ),
+                "equipment_count": count,
+                "equipment_stale": card.itinvent_state == "stale",
+            }
         if card.itinvent_state == "owner_not_found":
-            return self._row("IT Invent", "Отсутствует")
+            return {**self._row("IT Invent", "Отсутствует"), "equipment_count": 0}
         if card.itinvent_state == "not_configured":
             return self._row("IT Invent", "Не настроено")
         if card.itinvent_state == "no_login":
