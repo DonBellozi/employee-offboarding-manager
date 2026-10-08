@@ -1324,7 +1324,8 @@
   position: relative;
   transition: background-color .2s ease, box-shadow .2s ease;
 }
-.blocking-equipment-card.has-equipment {
+.blocking-equipment-card.has-equipment,
+.upcoming-equipment.present {
   animation: blocking-equipment-attention 2.2s ease-in-out infinite;
 }
 .blocking-equipment-card.equipment-clear {
@@ -1383,6 +1384,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .upcoming-equipment.present,
   .blocking-equipment-card.has-equipment,
   .blocking-equipment-card.equipment-alarm {
     animation: none !important;
