@@ -47,6 +47,7 @@ def ensure_compatibility_schema() -> None:
             )
 
     with engine.begin() as connection:
+        add_missing_columns(connection, "account_requirement_cases", {"hr_confirmed_at": "DATETIME"})
         add_missing_columns(
             connection,
             "provisioning_operations",

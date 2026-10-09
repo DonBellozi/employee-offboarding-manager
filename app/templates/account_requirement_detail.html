@@ -5,6 +5,10 @@
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 <section class="card">
   <h2>{{ case.fio }}</h2>
+  {% if pre_registration %}
+  <p>Решение «УЗ нужна» принято при создании до выгрузки: {{ pre_registration.decided_at|app_datetime }} · {{ pre_registration.decided_by }}.</p>
+  <p class="muted">Кадровые сведения этого приёма подтверждены {{ case.hr_confirmed_at|app_datetime }} и сохранены для обучения. Дальнейшие изменения должности не заменяют этот снимок.</p>
+  {% endif %}
   {% for row in snapshot.placements %}<p>{{ row.organization }} · {{ row.department }} · {{ row.position }}</p>{% endfor %}
   <p class="muted">{{ 'Кадровый снимок решения сохранен.' if case.decision_snapshot_json else 'Показаны текущие кадровые сведения; снимок будет сохранен при финальном ответе.' }} Уточнение: {{ 'да' if case.clarification_required else 'нет' }}.</p>
   {% include "account_requirement_controls.html" %}

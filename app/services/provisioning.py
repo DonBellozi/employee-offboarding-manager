@@ -845,7 +845,7 @@ class ProvisioningService:
             warnings=tuple(warnings),
         )
 
-    def provision(self, db: Session, operator: str, data: ProvisioningInput) -> ProvisioningCredentials:
+    def provision(self, db: Session, operator: str, data: ProvisioningInput, *, track_requirement: bool = False) -> ProvisioningCredentials:
         # Выбранный логин уже проверен оператором. Полный поиск альтернатив
         # больше не нужен: останавливаем его и сразу выполняем финальную
         # проверку только выбранного логина.
@@ -898,6 +898,11 @@ class ProvisioningService:
             status=OperationStatus.RUNNING,
         )
         db.add(operation)
+        pre_requirement = None
+        if track_requirement and not self.settings.dry_run:
+            from app.services.account_requirement_pre_registration import PreRegistrationRequirementService
+            db.flush()
+            pre_requirement = PreRegistrationRequirementService(db).begin(operation)
         db.commit()
         db.refresh(operation)
 
@@ -1015,6 +1020,8 @@ class ProvisioningService:
         )
         operation.error_message = "\n".join(warnings)[:4000]
         operation.completed_at = datetime.now(timezone.utc)
+        if pre_requirement is not None:
+            PreRegistrationRequirementService(db).pin_created_accounts(pre_requirement, operation, self.ad, self.zimbra)
         db.add(
             AuditLog(
                 actor=operator,

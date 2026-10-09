@@ -402,6 +402,8 @@ class EmployeeArrivalService:
             if provisioning_operation_id is not None
             else "accounts_confirmed"
         )
+        from app.services.account_requirement_pre_registration import PreRegistrationRequirementService
+        pre_case = PreRegistrationRequirementService(self.db).attach(context)
         for event in context["events"]:
             event.status = status
             event.decision_by = operator
@@ -435,6 +437,15 @@ class EmployeeArrivalService:
         if case is not None and (
             provisioning_operation_id is None
             or case.provisioning_operation_id != provisioning_operation_id
-        ):
+        ) and (pre_case is None or pre_case.id != case.id):
             requirement_service.cancel(case, "Приняты или восстановлены существующие учетки", actor=operator)
+            # A known pre-creation positive may still be waiting for the HR job.
+            # Preserve its claim to this unlabelled case, not a later rehire.
+            from app.models_account_requirement import AccountRequirementPreRegistration
+            if case.decision is None:
+                for waiting in self.db.scalars(select(AccountRequirementPreRegistration).where(
+                    AccountRequirementPreRegistration.status == "waiting",
+                    AccountRequirementPreRegistration.merge_case_id == case.id,
+                )):
+                    waiting.merge_cancelled_automatically = True
         self.db.commit()

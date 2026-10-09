@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -104,12 +105,16 @@ class AccountRequirementService:
         self.db.expire_all()
         self.assert_import_idle()
         context = EmployeeArrivalService(self.db).registration_context(raw_event_ids)
+        from app.services.account_requirement_pre_registration import PreRegistrationRequirementService
+        pre_case = PreRegistrationRequirementService(self.db).attach(context, account_state)
+        if pre_case:
+            return pre_case
         case = self.find(context["event_ids"])
         if account_state.get("errors"):
             return case  # An unavailable directory is not proof of missing accounts.
         if account_state.get("has_candidates"):
             if case and case.state in {"pending", "clarification"}:
-                self.cancel(case, "Обнаружена существующая учетная запись")
+                self.cancel(case, "Обнаружена существующая учетная запись", automatic=True)
             return None
         if case:
             for event_id in set(context["event_ids"]) - set(self.event_ids(case)):
@@ -128,10 +133,17 @@ class AccountRequirementService:
         self.db.commit()
         return case
 
-    def cancel(self, case: AccountRequirementCase, reason: str, actor: str = "system") -> None:
+    def cancel(self, case: AccountRequirementCase, reason: str, actor: str = "system", *, automatic: bool = False) -> None:
         if case.state == "cancelled":
             return
         previous = case.state
+        if automatic and case.decision is None:
+            from app.models_account_requirement import AccountRequirementPreRegistration
+            for waiting in self.db.scalars(select(AccountRequirementPreRegistration).where(
+                AccountRequirementPreRegistration.status == "waiting",
+                AccountRequirementPreRegistration.merge_case_id == case.id,
+            )):
+                waiting.merge_cancelled_automatically = True
         case.state = "cancelled"
         self._event(case, previous_state=previous, previous_decision=case.decision, actor=actor, comment=reason)
         self.db.commit()
@@ -186,7 +198,8 @@ class AccountRequirementService:
             if case.decision_snapshot_json is None:
                 case.decision_snapshot_json = snapshot
             case.decided_by, case.decided_at = actor, utcnow()
-            case.decision_source = "manager_clarification" if case.clarification_required else "operator"
+            if case.decision_source != "pre_registration":
+                case.decision_source = "manager_clarification" if case.clarification_required else "operator"
             if action == "not_required":
                 for event in self._arrivals(case):
                     if event.status == "pending":
@@ -229,7 +242,16 @@ class AccountRequirementService:
 
 
 def build_account_requirement_dataset(db: Session) -> dict:
-    """Only frozen pre-decision features. No identity/operator/result fields in X."""
+    """Frozen decision/first-confirmed-hire features; no identity or outcome in X."""
+    from app.models_account_requirement import AccountRequirementPreRegistration
+    pre_cases = {row.case_id: row for row in db.scalars(select(AccountRequirementPreRegistration).where(
+        AccountRequirementPreRegistration.status == "matched",
+    ))}
+    pre_case_ids = set(pre_cases)
+    def timestamp(value):
+        if value is None:
+            return None
+        return (value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)).isoformat()
     rows = []
     for case in db.scalars(select(AccountRequirementCase).where(
         AccountRequirementCase.state == "decided",
@@ -237,7 +259,7 @@ def build_account_requirement_dataset(db: Session) -> dict:
     ).order_by(AccountRequirementCase.id)).all():
         service = AccountRequirementService(db)
         events = service._arrivals(case)
-        if not events or any(event.status == "accounts_confirmed" for event in events):
+        if not events or (case.id not in pre_case_ids and any(event.status == "accounts_confirmed" for event in events)):
             continue
         snapshot = json.loads(case.decision_snapshot_json or "null")
         if not isinstance(snapshot, dict) or snapshot.get("snapshot_schema_version") != SNAPSHOT_SCHEMA_VERSION:
@@ -252,7 +274,11 @@ def build_account_requirement_dataset(db: Session) -> dict:
         features["active_placements_count"] = len(features["placements"])
         rows.append({"case_id": case.id, "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
                      "snapshot_hash": snapshot_hash(case.decision_snapshot_json),
+                     "feature_source": "first_confirmed_hire" if case.id in pre_case_ids else "decision_time",
+                     "decision_at": timestamp(case.decided_at),
+                     "original_decision_at": timestamp(pre_cases[case.id].decided_at) if case.id in pre_case_ids else timestamp(case.decided_at),
+                     "hr_confirmed_at": timestamp(case.hr_confirmed_at),
                      "X": features, "y": int(case.decision == "required")})
-    content = {"dataset_schema_version": 1, "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
+    content = {"dataset_schema_version": 2, "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
                "records_count": len(rows), "records": rows}
     return {**content, "dataset_sha256": snapshot_hash(canonical_json(content))}

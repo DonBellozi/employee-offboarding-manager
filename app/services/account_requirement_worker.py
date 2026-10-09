@@ -38,6 +38,8 @@ class AccountRequirementWorker:
                 service.assert_import_idle()
             except ValueError:
                 return
+            from app.services.account_requirement_pre_registration import PreRegistrationRequirementService
+            PreRegistrationRequirementService(db).reconcile_confirmed()
             service.cancel_stale()
             grouped = defaultdict(list)
             for row in db.scalars(select(HREmploymentArrivalEvent).where(

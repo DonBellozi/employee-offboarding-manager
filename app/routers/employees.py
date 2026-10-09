@@ -1189,7 +1189,9 @@ def provision_employee(
             mail_domain=mail_domain,
         )
         requirement_action_started = True
-        credentials = ProvisioningService(settings).provision(db, user.username, data)
+        credentials = ProvisioningService(settings).provision(
+            db, user.username, data, track_requirement=not bool(arrival_event_ids.strip()),
+        )
         if requirement_case_id is not None:
             AccountRequirementService(db).record_external_result(requirement_case_id, credentials)
         if (

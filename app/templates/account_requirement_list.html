@@ -17,15 +17,15 @@
   </form>
 </section>
 <section class="card">
-  <p>Найдено: {{ rows|length }}. Экспорт включает все действующие финальные решения, независимо от фильтров.</p>
+  <p>Найдено: {{ rows|length }}. Экспорт включает решения с подтверждёнными кадровыми сведениями, независимо от фильтров. Ожидающие выгрузки в обучение пока не входят.</p>
   <div class="table-wrap"><table>
     <thead><tr><th>Сотрудник</th><th>Организация / подразделение / должность</th><th>Статус</th><th>Решение</th><th>Уточнение</th><th>Оператор</th><th>Дата</th></tr></thead>
     <tbody>{% for item in rows %}{% set case = item.case %}<tr>
-      <td><a href="/account-requirements/{{ case.id }}">{{ case.fio }}</a></td>
-      <td>{% for row in item.placements %}<div>{{ row.organization }} · {{ row.department }} · {{ row.position }}</div>{% endfor %}</td>
+      <td><a href="{{ item.detail_url }}">{{ case.fio }}</a>{% if item.origin_label %}<div class="muted">{{ item.origin_label }}</div>{% endif %}</td>
+      <td>{% for row in item.placements %}<div>{{ row.organization }} · {{ row.department }} · {{ row.position }}</div>{% else %}<span class="muted">Ожидаются кадровые сведения</span>{% endfor %}</td>
       <td>{{ state_labels.get(case.state, case.state) }}</td><td>{{ decision_labels.get(case.decision, '—') }}</td>
       <td>{{ 'Да' if case.clarification_required else 'Нет' }}</td><td>{{ case.decided_by or '—' }}</td>
-      <td>{{ (case.decided_at or case.created_at)|app_datetime }}</td>
+      <td>{{ (case.decided_at or case.created_at)|app_datetime }}{% if item.hr_confirmed_at %}<div class="muted">Кадры: {{ item.hr_confirmed_at|app_datetime }}</div>{% endif %}</td>
     </tr>{% else %}<tr><td colspan="7">Решений пока нет</td></tr>{% endfor %}</tbody>
   </table></div>
 </section>

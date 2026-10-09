@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Решение до кадровой выгрузки{% endblock %}
+{% block content %}
+<h1>Необходимость корпоративной учетной записи</h1>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+<section class="card">
+  <h2>{{ pre.fio }}</h2>
+  <p><strong>УЗ нужна</strong> · Создание до выгрузки</p>
+  <p>Решение: {{ pre.decided_at|app_datetime }} · {{ pre.decided_by }}</p>
+  <p>{{ 'Отменено' if pre.status == 'cancelled' else 'Ожидает кадрового подтверждения' }}</p>
+  {% if pre.match_note != 'Ожидает кадрового подтверждения' %}<p class="muted">{{ pre.match_note }}</p>{% endif %}
+  <p>Создание учеток: {{ {'draft': 'Не начато', 'running': 'Выполняется', 'success': 'Завершено', 'partial': 'Завершено с предупреждениями', 'failed': 'Ошибка'}.get(operation.status.value, operation.status.value) }}. Логин: <code>{{ operation.login }}</code> · {{ operation.corporate_email }}</p>
+  <p class="muted">После однозначного сопоставления с кадровым приёмом система сохранит организацию, подразделение и должность. Пока запись не включается в обучение. Повторное создание или решение не требуется.</p>
+  {% if pre.status == 'waiting' and user.role == 'admin' %}
+  <form method="post" action="/account-requirements/pre-registration/{{ pre.id }}/cancel" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="revision" value="{{ pre.revision }}">
+    <label>Причина отмены<textarea name="comment" maxlength="4000" required rows="2"></textarea></label>
+    <div><button class="button secondary" type="submit">Отменить ошибочную запись</button></div>
+    <p class="muted">Отмена решения не удаляет и не блокирует созданные учетки. История остаётся в журнале.</p>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

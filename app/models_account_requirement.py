@@ -37,6 +37,7 @@ class AccountRequirementCase(Base):
     comment: Mapped[str] = mapped_column(Text, default="")
     decided_by: Mapped[str] = mapped_column(String(256), default="")
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    hr_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_account: Mapped[bool] = mapped_column(Boolean, default=False)
     external_action_status: Mapped[str] = mapped_column(String(32), default="not_started")
     provisioning_operation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -69,3 +70,26 @@ class AccountRequirementDecisionEvent(Base):
     snapshot_json: Mapped[str] = mapped_column(Text)
     snapshot_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AccountRequirementPreRegistration(Base):
+    """Positive manual decision before an HR arrival exists; no employee registry."""
+    __tablename__ = "account_requirement_pre_registrations"
+    __table_args__ = (CheckConstraint("status IN ('waiting','matched','cancelled')"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provisioning_operation_id: Mapped[int] = mapped_column(
+        ForeignKey("provisioning_operations.id"), unique=True,
+    )
+    fio: Mapped[str] = mapped_column(String(512))
+    decided_by: Mapped[str] = mapped_column(String(256))
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    initial_snapshot_json: Mapped[str] = mapped_column(Text)
+    ad_object_guid: Mapped[str] = mapped_column(String(64), default="")
+    zimbra_id: Mapped[str] = mapped_column(String(128), default="")
+    status: Mapped[str] = mapped_column(String(32), default="waiting", index=True)
+    match_note: Mapped[str] = mapped_column(Text, default="Ожидает кадрового подтверждения")
+    case_id: Mapped[int | None] = mapped_column(ForeignKey("account_requirement_cases.id"), nullable=True, unique=True)
+    merge_case_id: Mapped[int | None] = mapped_column(ForeignKey("account_requirement_cases.id"), nullable=True)
+    merge_cancelled_automatically: Mapped[bool] = mapped_column(Boolean, default=False)
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    __mapper_args__ = {"version_id_col": revision}
