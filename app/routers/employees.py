@@ -971,6 +971,22 @@ def parse_employee(
         )
 
 
+@router.get("/employees/login-owner")
+def login_owner(
+    request: Request,
+    login: str,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    get_current_user(request)
+    normalized_login = login.strip().lower()
+    if not LOGIN_RE.fullmatch(normalized_login):
+        return JSONResponse({"ok": False, "error": "Некорректный формат логина"}, status_code=400)
+    from app.services.login_owner import LoginOwnerService
+    return JSONResponse({"ok": True, "owners": LoginOwnerService(db, settings).inspect(normalized_login)},
+                        headers={"Cache-Control": "no-store"})
+
+
 @router.get("/employees/check-login/{source}")
 def check_login_source(
     source: str,

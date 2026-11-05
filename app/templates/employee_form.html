@@ -337,10 +337,11 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
 
   <section class="card">
     <h2>Логин и почтовый домен</h2>
-    <p>Форма уже открыта. Active Directory и Zimbra проверяются независимо. Стандартный логин остается выбранным, а свободные альтернативы показываются ниже для решения оператора.</p>
+    <p>Свободные альтернативы показываются ниже для решения оператора.</p>
 
+    <div class="provision-compact-grid">
     <div class="login-domain-stack">
-      <div class="grid two login-domain-fields">
+      <div class="login-domain-fields">
         <label>Предлагаемый или собственный логин
           <input id="login"
                  name="login"
@@ -399,6 +400,8 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
         </div>
       </div>
     </div>
+    </div>
+    <div id="login-owner-note" class="login-owner-note" aria-live="polite" hidden></div>
 
     {% if candidates %}
     <div class="candidate-pool">
@@ -480,27 +483,11 @@ function occupiedSourceNames(item) {
 }
 
 function updatePreferredLoginNote() {
-  if (!preferredLoginNote || !preferredLogin) {
-    return;
-  }
-
-  const item = candidateResultMap.get(preferredLogin);
-  if (!item || item.free) {
+  // The selected-login summary already explains collisions. Avoid duplicate warnings.
+  if (preferredLoginNote) {
     preferredLoginNote.hidden = true;
     preferredLoginNote.textContent = '';
-    return;
   }
-
-  const sources = occupiedSourceNames(item);
-  const sourceText = sources.length ? sources.join(' и ') : 'одной из внешних систем';
-  const currentLogin = valueOf('login').toLowerCase();
-  const suffix = currentLogin && currentLogin !== preferredLogin
-    ? ` Выбран другой логин «${currentLogin}».`
-    : ' Выберите свободный вариант ниже, введите собственный логин или освободите стандартный логин и нажмите «Проверить снова».';
-
-  preferredLoginNote.hidden = false;
-  preferredLoginNote.textContent =
-    `Стандартный логин «${preferredLogin}» занят в ${sourceText}.${suffix}`;
 }
 
 function selectLogin(login, automatic = false) {
@@ -620,6 +607,36 @@ function applyCandidateResult(login) {
 function cancelActiveChecks() {
   activeControllers.forEach(controller => controller.abort());
   activeControllers = [];
+  const note = document.getElementById('login-owner-note');
+  note.hidden = true;
+  note.replaceChildren();
+}
+
+async function checkLoginOwner(login, sequence) {
+  const note = document.getElementById('login-owner-note');
+  const controller = new AbortController();
+  activeControllers.push(controller);
+  note.hidden = false;
+  note.textContent = 'Проверяется владелец занятого логина…';
+  try {
+    const response = await fetch(`/employees/login-owner?login=${encodeURIComponent(login)}`, {
+      headers: {'Accept': 'application/json'}, cache: 'no-store', signal: controller.signal,
+    });
+    const data = await response.json();
+    if (sequence !== checkSequence || valueOf('login').toLowerCase() !== login) return;
+    if (!response.ok || !data.ok) throw new Error('owner-check');
+    note.replaceChildren();
+    for (const owner of data.owners) {
+      const line = document.createElement('p');
+      const label = document.createElement('strong');
+      label.textContent = [owner.source, owner.fio].filter(Boolean).join(' · ');
+      line.append(label, document.createTextNode(`${label.textContent ? ' — ' : ''}${owner.message}`));
+      note.append(line);
+    }
+  } catch (error) {
+    if (error.name === 'AbortError' || sequence !== checkSequence || valueOf('login').toLowerCase() !== login) return;
+    note.textContent = 'Владелец не проверен. Нажмите «Проверить снова».';
+  }
 }
 
 function resetForInvalidLogin() {
@@ -725,13 +742,14 @@ function updateOverallResult(login, sequence) {
     setProvisionEnabled(false);
     setSummary(
       'occupied',
-      `Логин «${login}» занят: ${occupiedLabels.join(' и ')}. Введите другой логин или выберите свободный вариант ниже.`,
+      'Логин занят. Выберите альтернативу ниже или введите свой.',
     );
+    checkLoginOwner(login, sequence);
     return;
   }
 
   setProvisionEnabled(true);
-  setSummary('free', `Логин «${login}» свободен и может быть зарегистрирован.`);
+  setSummary('free', 'Логин свободен.');
 
   if (login === preferredLogin) {
     stopCandidatePoolBecausePreferredIsFree();
@@ -790,6 +808,8 @@ async function runLoginCheck(forceRefresh = false) {
 }
 
 function scheduleLoginCheck() {
+  cancelActiveChecks();
+  checkSequence += 1;
   operatorChangedLogin = true;
   updateSuggestionSelection();
   updatePreview();

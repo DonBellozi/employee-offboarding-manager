@@ -454,6 +454,27 @@ button.danger {
 }
 
 
+/* Compact provisioning: inputs left, independent checks and submit right. */
+.provision-compact-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; align-items: stretch; }
+.provision-compact-grid .login-domain-fields { display: grid; gap: 14px; }
+.provision-compact-grid .login-domain-stack { display: flex; flex-direction: column; }
+.provision-compact-grid .login-domain-actions { display: block; margin-top: auto; }
+.provision-compact-grid .check-again { min-width: 0; }
+.provision-compact-grid .login-check-panel { margin-top: 0; display: flex; flex-direction: column; min-width: 0; }
+.provision-compact-grid .login-check-row { grid-template-columns: minmax(0, 1fr) auto; }
+.provision-compact-grid .login-check-status { min-width: 0; }
+.provision-compact-grid .login-check-action-row { grid-template-columns: 1fr; margin-top: auto; }
+.provision-compact-grid .login-check-action-row .login-check-summary { min-height: 0; padding: 10px 14px; }
+.provision-compact-grid .provision-button-cell { justify-content: flex-end; }
+.login-owner-note { margin-top: 12px; padding: 10px 14px; border-left: 3px solid #f59e0b; background: #fffbeb; }
+.login-owner-note[hidden] { display: none; }
+.login-owner-note p { margin: 4px 0; }
+@media (max-width: 850px) {
+  .provision-compact-grid { grid-template-columns: minmax(0, 1fr); }
+  .provision-compact-grid .login-check-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .provision-compact-grid .provision-inline-button { min-width: 0; max-width: 100%; }
+}
+
 /* Шаблоны писем по почтовым доменам */
 .mail-profile-grid {
   display: grid;
