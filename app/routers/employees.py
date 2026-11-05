@@ -109,6 +109,10 @@ def _provisioning_journal_item(operation: ProvisioningOperation) -> dict[str, ob
             *([("Использована существующая AD", "Да")] if operation.operation_kind == "mail_only" else []),
             ("Учетная запись AD включена", _yes_no(operation.ad_enabled)),
             ("Ящик Zimbra создан", _yes_no(operation.zimbra_created)),
+            *([
+                ("Реквизиты на личный адрес", _yes_no(operation.personal_mail_sent) if operation.personal_email else "Не указан"),
+                ("Реквизиты на корпоративный адрес", _yes_no(operation.corporate_mail_sent)),
+            ] if getattr(operation, "credential_delivery_mode", "legacy") in {"combined", "mail_only"} else [
             (
                 "Получатель реквизитов почты",
                 operation.personal_email or operation.corporate_email,
@@ -122,6 +126,7 @@ def _provisioning_journal_item(operation: ProvisioningOperation) -> dict[str, ob
                 ("Не требуется: пароль существующей AD не изменялся"
                  if operation.operation_kind == "mail_only" else _yes_no(operation.corporate_mail_sent)),
             ),
+            ]),
         ],
         "error_message": operation.error_message,
         "completed_at": operation.completed_at,
@@ -921,7 +926,7 @@ def parse_employee(
         if not parsed.personal_email and not no_email_confirmed:
             raise ValueError(
                 "ФИО введено без личного email. Подтвердите, "
-                "что оба письма с реквизитами будут отправлены "
+                "что письмо со всеми реквизитами будет отправлено "
                 "на создаваемую корпоративную почту."
             )
 

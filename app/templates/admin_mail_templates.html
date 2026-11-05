@@ -34,7 +34,7 @@
           <code>@{{ profile.domain }}</code>
         </div>
 
-        {% for template_key in ['personal', 'corporate', 'dismissal'] %}
+        {% for template_key in ['combined', 'personal', 'corporate', 'dismissal'] %}
         {% set definition = template_definitions[template_key] %}
         {% set panel_key = profile.id|string + ':' + template_key %}
         <a href="/admin/mail-templates?selected={{ panel_key }}"
@@ -51,10 +51,14 @@
 
   <section class="card mail-template-editor-shell">
     {% for profile in profiles %}
-      {% for template_key in ['personal', 'corporate', 'dismissal'] %}
+      {% for template_key in ['combined', 'personal', 'corporate', 'dismissal'] %}
         {% set definition = template_definitions[template_key] %}
         {% set panel_key = profile.id|string + ':' + template_key %}
-        {% if template_key == 'personal' %}
+        {% if template_key == 'combined' %}
+          {% set subject_value = profile.combined_subject %}
+          {% set body_value = profile.combined_body_html %}
+          {% set updated_by = profile.updated_by %}
+        {% elif template_key == 'personal' %}
           {% set subject_value = profile.personal_subject %}
           {% set body_value = profile.personal_body_html %}
           {% set updated_by = profile.updated_by %}

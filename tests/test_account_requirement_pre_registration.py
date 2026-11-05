@@ -348,12 +348,14 @@ def test_real_provisioning_records_intent_before_external_action_and_excludes_dr
             return original
         service.ad.create_disabled_user.side_effect = create
         if scenario == "partial":
-            service.mailer.send_ad_credentials.side_effect = RuntimeError("SMTP failed")
+            service.mailer.send_combined_credentials.side_effect = RuntimeError("SMTP failed")
         if scenario == "pin-error":
             service.ad.get_user.side_effect = RuntimeError("AD unavailable")
             service.zimbra.account_by_address.side_effect = RuntimeError("Zimbra unavailable")
         result = service.provision(db, "creator", DATA, track_requirement=scenario != "untracked")
         assert result.operation_id
+        if scenario == "partial":
+            assert result.status == "partial"
     rows = db.scalars(select(AccountRequirementPreRegistration)).all()
     assert len(rows) == (0 if scenario in {"dry_run", "occupied", "untracked"} else 1)
     if rows:

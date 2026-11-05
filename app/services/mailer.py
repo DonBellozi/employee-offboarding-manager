@@ -33,6 +33,21 @@ CORPORATE_TEMPLATE_VARIABLES = {
     "mail_domain",
 }
 
+COMBINED_TEMPLATE_VARIABLES = PERSONAL_TEMPLATE_VARIABLES | CORPORATE_TEMPLATE_VARIABLES
+DEFAULT_COMBINED_SUBJECT = "Реквизиты учетных записей"
+DEFAULT_COMBINED_BODY_HTML = """\
+<p>Здравствуйте, {{ full_name }}!</p>
+<p>Для Вас созданы учетные записи.</p>
+<h3>Вход на компьютер — Active Directory</h3>
+<p><strong>Логин:</strong> {{ ad_login }}<br>
+<strong>Пароль:</strong> {{ ad_password }}</p>
+<h3>Корпоративная почта — Zimbra</h3>
+<p><strong>Адрес:</strong> {{ corporate_email }}<br>
+<strong>Пароль:</strong> {{ mail_password }}</p>
+<p>Не передавайте пароли другим людям. При первом входе система может
+потребовать сменить временный пароль.</p>
+"""
+
 
 DEFAULT_PERSONAL_SUBJECT = "Реквизиты корпоративной электронной почты"
 DEFAULT_PERSONAL_BODY_HTML = """\
@@ -183,6 +198,13 @@ def ensure_domain_mail_profiles(
     changed = False
     for domain in domains:
         if domain in existing:
+            profile = existing[domain]
+            if not str(profile.combined_subject or "").strip():
+                profile.combined_subject = DEFAULT_COMBINED_SUBJECT
+                changed = True
+            if not str(profile.combined_body_html or "").strip():
+                profile.combined_body_html = DEFAULT_COMBINED_BODY_HTML
+                changed = True
             continue
         profile = DomainMailProfile(
             domain=domain,
@@ -192,6 +214,8 @@ def ensure_domain_mail_profiles(
             personal_body_html=DEFAULT_PERSONAL_BODY_HTML,
             corporate_subject=DEFAULT_CORPORATE_SUBJECT,
             corporate_body_html=DEFAULT_CORPORATE_BODY_HTML,
+            combined_subject=DEFAULT_COMBINED_SUBJECT,
+            combined_body_html=DEFAULT_COMBINED_BODY_HTML,
         )
         db.add(profile)
         existing[domain] = profile
@@ -265,8 +289,12 @@ class CredentialMailer:
         finally:
             try:
                 client.quit()
-            except smtplib.SMTPException:
-                client.close()
+            except (OSError, smtplib.SMTPException):
+                # DATA was already accepted. A failed QUIT is not a failed send.
+                try:
+                    client.close()
+                except (OSError, smtplib.SMTPException):
+                    pass
 
     def test_connection(self) -> str:
         """Проверить SMTP, TLS и аутентификацию без отправки письма."""
@@ -378,6 +406,20 @@ class CredentialMailer:
             body_html,
             sender_email=sender_email,
             sender_name=sender_name,
+        )
+
+    def send_combined_credentials(
+        self, *, profile: DomainMailProfile, recipient: str, full_name: str,
+        corporate_email: str, mail_password: str, ad_login: str, ad_password: str,
+    ) -> None:
+        context = {"full_name": full_name, "corporate_email": corporate_email,
+                   "mail_password": mail_password, "ad_login": ad_login,
+                   "ad_password": ad_password, "mail_domain": profile.domain}
+        self._send(
+            recipient,
+            render_mail_template(profile.combined_subject, context, autoescape=False),
+            render_mail_template(profile.combined_body_html, context, autoescape=True),
+            sender_email=profile.sender_email, sender_name=profile.sender_name,
         )
 
     def send_mail_credentials(

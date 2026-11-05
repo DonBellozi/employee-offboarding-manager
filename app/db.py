@@ -51,8 +51,13 @@ def ensure_compatibility_schema() -> None:
         add_missing_columns(
             connection,
             "provisioning_operations",
-            {"operation_kind": "VARCHAR(32) NOT NULL DEFAULT 'full'"},
+            {"operation_kind": "VARCHAR(32) NOT NULL DEFAULT 'full'",
+             "credential_delivery_mode": "VARCHAR(32) NOT NULL DEFAULT 'legacy'"},
         )
+        add_missing_columns(connection, "domain_mail_profiles", {
+            "combined_subject": "VARCHAR(512) NOT NULL DEFAULT ''",
+            "combined_body_html": "TEXT NOT NULL DEFAULT ''",
+        })
         add_missing_columns(
             connection,
             "zimbra_mail_recall_runs",

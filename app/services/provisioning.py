@@ -98,6 +98,7 @@ class ProvisioningCredentials:
     personal_mail_sent: bool
     corporate_mail_sent: bool
     warnings: tuple[str, ...]
+    credential_delivery_mode: str = "legacy"
 
 
 class ProvisioningService:
@@ -859,11 +860,6 @@ class ProvisioningService:
             raise RuntimeError(f"Логин уже занят: {occupied}")
 
         full_name = " ".join(part for part in [data.last_name, data.first_name, data.middle_name] if part)
-        mail_profile = get_domain_mail_profile(
-            db,
-            self.settings,
-            data.mail_domain,
-        )
         mail_password = generate_mail_password(
             self.settings.mail_password_length,
             self.settings.mail_password_specials,
@@ -886,6 +882,7 @@ class ProvisioningService:
             else data.mail_domain
         )
         corporate_email = f"{data.login}@{primary_domain}"
+        mail_profile = get_domain_mail_profile(db, self.settings, primary_domain)
         operation = ProvisioningOperation(
             operator_username=operator,
             last_name=data.last_name,
@@ -964,49 +961,50 @@ class ProvisioningService:
             except Exception as exc:
                 warnings.append(f"Учетная запись AD создана, но осталась отключенной: {exc}")
 
-        # 4. Отправка писем не откатывает созданные учетные записи.
-        # При отсутствии личного адреса письмо с реквизитами почты
-        # отправляется на только что созданную именную корпоративную почту.
+        # 4. One message per distinct recipient, never CC/BCC. Transport retries
+        # are inside each send, so a failed destination cannot re-send another.
         mail_credentials_recipient = (
             data.personal_email or corporate_email
         )
+        operation.credential_delivery_mode = (
+            "combined" if operation.ad_enabled and operation.zimbra_created else "mail_only"
+        )
+        db.commit()
         if operation.zimbra_created:
-            try:
-                self.mailer.send_mail_credentials(
-                    profile=mail_profile,
-                    personal_email=mail_credentials_recipient,
-                    full_name=full_name,
-                    corporate_email=corporate_email,
-                    mail_password=mail_password,
-                )
-                operation.personal_mail_sent = True
+            recipients = list(dict.fromkeys(
+                address.strip().lower() for address in (data.personal_email, corporate_email)
+                if address.strip()
+            ))
+            for recipient in recipients:
+                try:
+                    if operation.credential_delivery_mode == "combined":
+                        self.mailer.send_combined_credentials(
+                            profile=mail_profile, recipient=recipient, full_name=full_name,
+                            corporate_email=corporate_email, mail_password=mail_password,
+                            ad_login=data.login, ad_password=ad_password,
+                        )
+                    else:
+                        # AD did not become ready: do not advertise unusable AD credentials.
+                        self.mailer.send_mail_credentials(
+                            profile=mail_profile, personal_email=recipient, full_name=full_name,
+                            corporate_email=corporate_email, mail_password=mail_password,
+                        )
+                except Exception:
+                    # Never copy a template/SMTP exception containing credentials into audit.
+                    warnings.append(f"Реквизиты не отправлены на {recipient}. Проверьте шаблон и SMTP.")
+                    continue
+                if recipient == data.personal_email.strip().lower():
+                    operation.personal_mail_sent = True
+                if recipient == corporate_email.strip().lower():
+                    operation.corporate_mail_sent = True
                 db.commit()
-            except Exception as exc:
-                warnings.append(
-                    "Реквизиты почты не отправлены на "
-                    f"{mail_credentials_recipient}: {exc}"
-                )
-
-        if operation.ad_enabled and operation.zimbra_created:
-            try:
-                self.mailer.send_ad_credentials(
-                    profile=mail_profile,
-                    corporate_email=corporate_email,
-                    full_name=full_name,
-                    ad_login=data.login,
-                    ad_password=ad_password,
-                )
-                operation.corporate_mail_sent = True
-                db.commit()
-            except Exception as exc:
-                warnings.append(f"Реквизиты AD не отправлены на корпоративную почту: {exc}")
 
         complete = all(
             [
                 operation.ad_created,
                 operation.ad_enabled,
                 operation.zimbra_created,
-                operation.personal_mail_sent,
+                operation.personal_mail_sent or not data.personal_email.strip(),
                 operation.corporate_mail_sent,
             ]
         )
@@ -1051,4 +1049,5 @@ class ProvisioningService:
             personal_mail_sent=operation.personal_mail_sent,
             corporate_mail_sent=operation.corporate_mail_sent,
             warnings=tuple(warnings),
+            credential_delivery_mode=operation.credential_delivery_mode,
         )

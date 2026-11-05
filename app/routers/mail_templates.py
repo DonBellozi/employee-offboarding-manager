@@ -17,6 +17,7 @@ from app.services.dismissal_mailer import (
     ensure_dismissal_mail_templates,
 )
 from app.services.mailer import (
+    COMBINED_TEMPLATE_VARIABLES,
     CORPORATE_TEMPLATE_VARIABLES,
     PERSONAL_TEMPLATE_VARIABLES,
     CredentialMailer,
@@ -31,16 +32,22 @@ router = APIRouter()
 templates = register_datetime_filters(Jinja2Templates(directory="app/templates"))
 
 TEMPLATE_DEFINITIONS = {
+    "combined": {
+        "label": "Все реквизиты — AD и почта",
+        "short_label": "Все реквизиты",
+        "description": "После создания AD и почты: отдельно на личный и корпоративный адрес.",
+        "variables": COMBINED_TEMPLATE_VARIABLES,
+    },
     "personal": {
         "label": "Реквизиты корпоративной почты",
         "short_label": "Реквизиты почты",
-        "description": "Отправляется на личный e-mail после создания почтового ящика.",
+        "description": "Для отдельного создания почты или частичной готовности УЗ.",
         "variables": PERSONAL_TEMPLATE_VARIABLES,
     },
     "corporate": {
         "label": "Реквизиты доменной учетной записи",
         "short_label": "Реквизиты AD",
-        "description": "Отправляется на корпоративный адрес после создания учетной записи AD.",
+        "description": "Для отдельного создания AD. Только новые реквизиты AD.",
         "variables": CORPORATE_TEMPLATE_VARIABLES,
     },
     "dismissal": {
@@ -60,6 +67,9 @@ def _test_context(template_key: str, domain: str) -> dict[str, str]:
         "corporate_email": corporate_email,
         "mail_domain": domain,
     }
+    if template_key == "combined":
+        return {**common, "mail_password": "TEST-Mail-Password-123!",
+                "ad_login": "ivanov.ii", "ad_password": "TEST-AD-Password-123!"}
     if template_key == "personal":
         return {
             **common,
@@ -164,7 +174,7 @@ def _page_context(
     }
     if selected not in valid_keys:
         selected = (
-            f"{profiles[0].id}:personal"
+            f"{profiles[0].id}:combined"
             if profiles
             else ""
         )
@@ -274,7 +284,10 @@ def update_mail_template(
         profile.sender_email = normalized_sender
         profile.updated_by = current.username
 
-        if key == "personal":
+        if key == "combined":
+            profile.combined_subject = subject.strip()
+            profile.combined_body_html = body_html.strip()
+        elif key == "personal":
             profile.personal_subject = subject.strip()
             profile.personal_body_html = body_html.strip()
         elif key == "corporate":

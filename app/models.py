@@ -52,6 +52,8 @@ class DomainMailProfile(Base):
     personal_body_html: Mapped[str] = mapped_column(Text)
     corporate_subject: Mapped[str] = mapped_column(String(512))
     corporate_body_html: Mapped[str] = mapped_column(Text)
+    combined_subject: Mapped[str] = mapped_column(String(512), default="")
+    combined_body_html: Mapped[str] = mapped_column(Text, default="")
     updated_by: Mapped[str] = mapped_column(String(256), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -60,6 +62,7 @@ class ProvisioningOperation(Base):
     __tablename__ = "provisioning_operations"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     operation_kind: Mapped[str] = mapped_column(String(32), default="full")
+    credential_delivery_mode: Mapped[str] = mapped_column(String(32), default="legacy")
     operator_username: Mapped[str] = mapped_column(String(256), index=True)
     last_name: Mapped[str] = mapped_column(String(128))
     first_name: Mapped[str] = mapped_column(String(128))
