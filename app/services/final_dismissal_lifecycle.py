@@ -56,6 +56,7 @@ SYSTEM_LABELS = {
 RETRY_DELAYS_MINUTES = (1, 2, 5, 10, 15, 30, 60)
 POST_RECONCILE_ACTION = "final_dismissal_post_reconcile"
 POST_RECONCILE_RETRY_MINUTES = 5
+RESOLVED_AD_CONFLICT = "ad_conflict_resolved"
 AD_REACTIVATION_AUTO_DAYS = 14
 
 
@@ -727,6 +728,25 @@ class FinalDismissalLifecycleService:
         if ad is not None:
             plans.append(ad)
 
+        conflict = self.db.scalar(select(FinalDismissalBlockTarget).where(
+            FinalDismissalBlockTarget.run_id == run.id,
+            FinalDismissalBlockTarget.system == "ad",
+            FinalDismissalBlockTarget.target_key == "ad:conflict",
+        ))
+        if conflict is not None and ad is not None and not ad["error"]:
+            if conflict.status == "intervention":
+                # This is a planning diagnostic, not an AD account. Retain it
+                # for history, but do not let a resolved ambiguity hold the run.
+                conflict.status = "cancelled"
+                conflict.last_result = RESOLVED_AD_CONFLICT
+                conflict.next_attempt_at = None
+                conflict.updated_at = utcnow()
+                self.db.add(AuditLog(
+                    actor="system", action="final_dismissal_ad_conflict_resolved",
+                    target=f"final-dismissal:{run.id}", result="resolved",
+                    details=f"previous_error={conflict.last_error}; replacement={ad['target_key']}",
+                ))
+
         for plan in plans:
             existing = self.db.scalar(
                 select(FinalDismissalBlockTarget).where(
@@ -737,6 +757,19 @@ class FinalDismissalLifecycleService:
                 )
             )
             if existing is not None:
+                if not plan["error"] and existing.status == "intervention" and existing.last_result == "ad_plan_conflict":
+                    existing.status = "pending"
+                    existing.last_error = ""
+                    existing.last_result = ""
+                    existing.next_attempt_at = utcnow()
+                if plan["error"] and existing.last_result == RESOLVED_AD_CONFLICT:
+                    # A new ambiguity must become visible again, not inherit
+                    # the cancellation of the previously resolved diagnostic.
+                    existing.status = "intervention"
+                    existing.last_result = ""
+                    existing.last_error = plan["error"]
+                    existing.completed_at = None
+                    existing.updated_at = utcnow()
                 if plan["identifier"]:
                     existing.target_identifier = plan["identifier"]
                 if plan["stable_id"]:
@@ -931,7 +964,10 @@ class FinalDismissalLifecycleService:
         self,
         run: FinalDismissalBlockRun,
     ) -> None:
-        targets = self._targets(run.id)
+        targets = [item for item in self._targets(run.id) if not (
+            item.system == "ad" and item.target_key == "ad:conflict"
+            and item.status == "cancelled" and item.last_result == RESOLVED_AD_CONFLICT
+        )]
         if not targets:
             if run.status == "success" and run.completed_at is not None:
                 run.last_error = ""
@@ -1054,6 +1090,13 @@ class FinalDismissalLifecycleService:
 
         try:
             if target.system == "ad":
+                records, mappings = self._records_and_mappings(run.worker_key)
+                current_plan = self._ad_plan(records, mappings)
+                if current_plan is not None and current_plan["error"]:
+                    self._fail_target(target, PermanentLifecycleError(current_plan["error"]))
+                    target.last_result = "ad_plan_conflict"
+                    self.db.commit()
+                    return
                 self._process_ad(target)
             else:
                 raise PermanentLifecycleError(
