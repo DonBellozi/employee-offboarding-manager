@@ -99,6 +99,7 @@ class ProvisioningCredentials:
     corporate_mail_sent: bool
     warnings: tuple[str, ...]
     credential_delivery_mode: str = "legacy"
+    delivery_results: tuple[dict, ...] = ()
 
 
 class ProvisioningService:
@@ -846,7 +847,11 @@ class ProvisioningService:
             warnings=tuple(warnings),
         )
 
-    def provision(self, db: Session, operator: str, data: ProvisioningInput, *, track_requirement: bool = False) -> ProvisioningCredentials:
+    def provision(self, db: Session, operator: str, data: ProvisioningInput, *, track_requirement: bool = False, arrival_event_ids: str = "") -> ProvisioningCredentials:
+        context = None
+        if arrival_event_ids:
+            from app.services.employee_arrivals import EmployeeArrivalService
+            context = EmployeeArrivalService(db).registration_context(arrival_event_ids)
         # Выбранный логин уже проверен оператором. Полный поиск альтернатив
         # больше не нужен: останавливаем его и сразу выполняем финальную
         # проверку только выбранного логина.
@@ -970,12 +975,29 @@ class ProvisioningService:
             "combined" if operation.ad_enabled and operation.zimbra_created else "mail_only"
         )
         db.commit()
+        delivery_rows = []
+        recipient_warnings = []
         if operation.zimbra_created:
-            recipients = list(dict.fromkeys(
-                address.strip().lower() for address in (data.personal_email, corporate_email)
-                if address.strip()
-            ))
-            for recipient in recipients:
+            from app.services.credential_recipients import plan_recipients, delivery_result
+            worker_key = ""
+            if context is not None:
+                try:
+                    refreshed = EmployeeArrivalService(db).registration_context(arrival_event_ids)
+                    normalize_fio = lambda value: " ".join(str(value).casefold().replace("ё", "е").split())
+                    if refreshed["worker_key"] != context["worker_key"] or normalize_fio(refreshed["fio"]) != normalize_fio(full_name):
+                        raise ValueError("identity changed")
+                    worker_key = context["worker_key"]
+                except ValueError:
+                    recipient_warnings.append("Дополнительные адреса не проверены: кадровое сопоставление изменилось.")
+            delivery_rows, groups, planning_warnings = plan_recipients(
+                db, operation=operation, zimbra=self.zimbra, personal_email=data.personal_email,
+                corporate_email=corporate_email, aliases=aliases, worker_key=worker_key,
+            )
+            recipient_warnings.extend(planning_warnings)
+            warnings.extend(recipient_warnings)
+            db.commit()
+            for group in groups.values():
+                recipient = group[0].recipient
                 try:
                     if operation.credential_delivery_mode == "combined":
                         self.mailer.send_combined_credentials(
@@ -992,10 +1014,16 @@ class ProvisioningService:
                 except Exception:
                     # Never copy a template/SMTP exception containing credentials into audit.
                     warnings.append(f"Реквизиты не отправлены на {recipient}. Проверьте шаблон и SMTP.")
+                    for row in group:
+                        row.status = "failed"
+                    db.commit()
                     continue
-                if recipient == data.personal_email.strip().lower():
+                for row in group:
+                    row.status = "sent"
+                    row.sent_at = datetime.now(timezone.utc)
+                if any(row.email == data.personal_email.strip().lower() for row in group):
                     operation.personal_mail_sent = True
-                if recipient == corporate_email.strip().lower():
+                if any(row.email == corporate_email.strip().lower() for row in group):
                     operation.corporate_mail_sent = True
                 db.commit()
 
@@ -1006,6 +1034,7 @@ class ProvisioningService:
                 operation.zimbra_created,
                 operation.personal_mail_sent or not data.personal_email.strip(),
                 operation.corporate_mail_sent,
+                not recipient_warnings and all(row.status in {"sent", "skipped"} for row in delivery_rows),
             ]
         )
         nothing_created = not operation.ad_created and not operation.zimbra_created
@@ -1050,4 +1079,5 @@ class ProvisioningService:
             corporate_mail_sent=operation.corporate_mail_sent,
             warnings=tuple(warnings),
             credential_delivery_mode=operation.credential_delivery_mode,
+            delivery_results=tuple(delivery_result(row) for row in delivery_rows) if delivery_rows else (),
         )

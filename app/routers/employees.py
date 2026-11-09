@@ -27,6 +27,7 @@ from app.time_utils import register_datetime_filters
 from app.security import get_current_user, get_or_create_csrf, require_operator, validate_csrf
 from app.services.ad import ActiveDirectoryService
 from app.services.blocking import BlockingService
+from app.services.credential_recipients import delivery_details
 from app.services.employee_arrivals import EmployeeArrivalService
 from app.services.account_requirement import AccountRequirementService
 from app.services.arrival_missing_mail import ArrivalMissingMailService
@@ -109,7 +110,8 @@ def _provisioning_journal_item(operation: ProvisioningOperation) -> dict[str, ob
             *([("Использована существующая AD", "Да")] if operation.operation_kind == "mail_only" else []),
             ("Учетная запись AD включена", _yes_no(operation.ad_enabled)),
             ("Ящик Zimbra создан", _yes_no(operation.zimbra_created)),
-            *([
+            *(delivery_details(operation.deliveries)
+              if getattr(operation, 'deliveries', None) else [
                 ("Реквизиты на личный адрес", _yes_no(operation.personal_mail_sent) if operation.personal_email else "Не указан"),
                 ("Реквизиты на корпоративный адрес", _yes_no(operation.corporate_mail_sent)),
             ] if getattr(operation, "credential_delivery_mode", "legacy") in {"combined", "mail_only"} else [
@@ -1212,6 +1214,7 @@ def provision_employee(
         requirement_action_started = True
         credentials = ProvisioningService(settings).provision(
             db, user.username, data, track_requirement=not bool(arrival_event_ids.strip()),
+            **({"arrival_event_ids": arrival_event_ids} if arrival_event_ids.strip() else {}),
         )
         if requirement_case_id is not None:
             AccountRequirementService(db).record_external_result(requirement_case_id, credentials)

@@ -67,6 +67,8 @@ code { font-family: Consolas, monospace; word-break: break-all; }
 .check-row { display: flex; align-items: flex-start; gap: 10px; margin-top: 16px; font-weight: 600; }
 .check-row input { width: auto; margin-top: 3px; }
 .state-grid { display: grid; grid-template-columns: 1fr auto; gap: 10px 20px; }
+.credential-delivery-state { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.credential-delivery-state > * { min-width: 0; overflow-wrap: anywhere; }
 .alert ul { margin-bottom: 0; }
 
 .login-domain-stack {

@@ -16,11 +16,16 @@
 
 <section class="card">
   <h2>Состояние операции</h2>
-  <div class="state-grid">
+  <div class="state-grid credential-delivery-state">
     <span>AD создана</span><strong>{{ 'Да' if credentials.ad_created else 'Нет' }}</strong>
     <span>AD включена</span><strong>{{ 'Да' if credentials.ad_enabled else 'Нет' }}</strong>
     <span>Zimbra создана</span><strong>{{ 'Да' if credentials.zimbra_created else 'Нет' }}</strong>
-    {% if credentials.credential_delivery_mode|default('legacy') != 'legacy' %}
+    {% if credentials.delivery_results|default([]) %}
+      {% for delivery in credentials.delivery_results %}
+      <span>Реквизиты → {{ delivery.email }}</span>
+      <strong>{{ {'pending':'Ожидает отправки', 'sent':'Отправлено', 'failed':'Не отправлено', 'skipped':'Пропущено', 'unverified':'Требует проверки'}.get(delivery.status, delivery.status) }}{% if delivery.note %}<br><span class="muted">{{ delivery.note }}</span>{% endif %}</strong>
+      {% endfor %}
+    {% elif credentials.credential_delivery_mode|default('legacy') != 'legacy' %}
     <span>Реквизиты на личный адрес</span>
     <strong>{{ 'Не указан' if not credentials.personal_email_provided else ('Отправлено' if credentials.personal_mail_sent else 'Не отправлено') }}</strong>
     <span>Реквизиты на корпоративный адрес</span>

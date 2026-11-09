@@ -258,14 +258,14 @@ def test_result_and_journal_show_recipient_status_without_passwords(db, service)
     result = create(db, service, personal='')
     operation = db.get(ProvisioningOperation,result.operation_id)
     item = employees._provisioning_journal_item(operation)
-    assert 'Реквизиты на корпоративный адрес' in str(item['details'])
-    assert 'Не указан' in str(item['details'])
+    assert 'Реквизиты → ivanov@example.test' in str(item['details'])
     assert 'ACCEPTED-AD-SECRET' not in str(item)
     assert result.mail_password not in str(item)
     rendered = employees.templates.env.get_template('result.html').render(user=None, credentials=result)
-    assert 'Реквизиты на личный адрес' in rendered
-    assert 'Не указан' in rendered
+    assert 'Реквизиты → ivanov@example.test' in rendered
     assert 'Письмо с реквизитами AD' not in rendered
     operation.credential_delivery_mode = 'legacy'
-    legacy = employees._provisioning_journal_item(operation)
+    legacy_operation = ProvisioningOperation(**{col.name:getattr(operation,col.name)
+        for col in ProvisioningOperation.__table__.columns if col.name != 'id'})
+    legacy = employees._provisioning_journal_item(legacy_operation)
     assert 'Реквизиты почты отправлены' in str(legacy['details'])
