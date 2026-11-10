@@ -383,10 +383,13 @@ def _final_dismissal_block_journal_item(
             }
         )
 
+        if target.system == 'ad' and target.last_result == 'confirmed_absent' and target.status in {'completed','already_completed'}:
+            blocking_systems[-1]['result'] = 'Отсутствует в AD (проверено)'
+
     ad_identifier = str(mapped_ad_login or "").strip() or next(
         (
             item.target_identifier
-            for item in targets
+            for item in sorted(targets, key=lambda t: t.last_result == 'confirmed_absent')
             if item.system == "ad"
             and item.target_identifier
         ),
@@ -599,7 +602,7 @@ def _completed_dismissal_journal_item(
         (
             target
             for target in targets
-            if target.system == "ad"
+            if target.system == "ad" and target.last_result != 'confirmed_absent'
             and target.status in {"completed", "already_completed"}
         ),
         None,
@@ -613,6 +616,9 @@ def _completed_dismissal_journal_item(
             state="warning",
             note="Заблокирован",
         )
+    elif any(t.system == 'ad' and t.status in {'completed','already_completed'}
+             and t.last_result == 'confirmed_absent' for t in targets):
+        set_system_row('AD', 'Отсутствует', state='neutral', note='Отсутствие подтверждено проверкой AD')
     set_system_row(
         "Автоблокировка при увольнении",
         "Выполнена",

@@ -144,21 +144,35 @@ class DismissalADMappingService:
         context, plan, candidate, lifecycle = checked()
         if not self.settings.ad_check_enabled:
             raise ValueError('Проверка AD отключена.')
+        ad = ActiveDirectoryService(self.settings)
+        def absent(guid, login):
+            try:
+                return ad.confirm_user_absent(object_guid=guid,username=login) is True
+            except Exception:
+                raise ValueError('AD не подтвердила отсутствие учётки. Проверьте связь, права и область поиска.') from None
         try:
-            user = ActiveDirectoryService(self.settings).get_user_by_object_guid(plan['stable_id'])
+            user = ad.get_user_by_object_guid(plan['stable_id'])
         except Exception:
             raise ValueError('Не удалось прочитать состояние AD. Учётки не изменялись.') from None
-        if user is None or norm(user.object_guid) != norm(plan['stable_id']):
+        missing = user is None
+        if missing and not absent(plan['stable_id'],plan['identifier']):
+            raise ValueError('Отсутствие AD не подтверждено. Возможны перемещение учётки или повторное использование логина.')
+        if user is not None and norm(user.object_guid) != norm(plan['stable_id']):
             raise ValueError('AD не подтвердила сохранённый objectGUID. Требуется проверка сопоставления.')
-        if fio(user.display_name) not in {fio(r.fio) for r in context['records']}:
+        if user is not None and fio(user.display_name) not in {fio(r.fio) for r in context['records']}:
             raise ValueError('ФИО AD не совпадает с кадровой историей.')
-        if user.is_enabled:
+        if user is not None and user.is_enabled:
             return 'AD активна. Запись не завершена; команды блокировки не выполнялись.'
-        if user.is_enabled is not False:
+        if user is not None and user.is_enabled is not False:
             raise ValueError('AD не подтвердила состояние блокировки учётки.')
+        deleted_targets = []
+        for old in lifecycle._targets(run_id):
+            if (old.system == 'ad' and old.target_key != plan['target_key'] and old.stable_id
+                and old.status in {'pending','intervention'} and absent(old.stable_id,old.target_identifier)):
+                deleted_targets.append((old.id,norm(old.stable_id),norm(old.target_identifier)))
         # Recheck HR, deferral, and the exact GUID after the LDAP read.
         refreshed, current_plan, candidate, lifecycle = checked()
-        if norm(current_plan['stable_id']) != norm(user.object_guid):
+        if norm(current_plan['stable_id']) != norm(plan['stable_id']):
             raise ValueError('Сопоставление изменилось во время проверки AD.')
         run = lifecycle._ensure_run(candidate)
         target = next((t for t in lifecycle._targets(run.id) if t.system == 'ad'
@@ -166,13 +180,18 @@ class DismissalADMappingService:
         if target is None or target.status == 'cancelled':
             raise ValueError('Нет действующей цели AD для подтверждённого сопоставления.')
         if target.status not in {'completed','already_completed'}:
-            lifecycle._complete_target(target,status='already_completed',result='already_disabled')
-            target.target_identifier = user.username
-            target.stable_id = user.object_guid
+            lifecycle._complete_target(target,status='already_completed',result='confirmed_absent' if missing else 'already_disabled')
+            target.target_identifier = plan['identifier'] if missing else user.username
+            target.stable_id = plan['stable_id'] if missing else user.object_guid
+        for old in lifecycle._targets(run.id):
+            proof = (old.id,norm(old.stable_id),norm(old.target_identifier))
+            if proof in deleted_targets and old.status in {'pending','intervention'}:
+                lifecycle._complete_target(old,status='already_completed',result='confirmed_absent')
         lifecycle._refresh_run(run)
         self.db.add(AuditLog(actor=actor,action='dismissal_ad_completion_verified',target=f'final-dismissal:{run.id}',
-            result=run.status,details=json.dumps({'ad_login':user.username,'ad_object_guid':user.object_guid,
-                                                'mode':'read_only'},ensure_ascii=False)))
+            result=run.status,details=json.dumps({'ad_login':target.target_identifier,'ad_object_guid':target.stable_id,
+                'confirmed_absent_ids':[item[0] for item in deleted_targets], 'selected_absent':missing,
+                'mode':'read_only'},ensure_ascii=False)))
         self.db.commit()
-        return ('Блокировка AD подтверждена. Запись перенесена в журнал.' if run.status == 'success'
-                else 'Блокировка AD подтверждена. В задаче остались другие незавершённые цели.')
+        return ('Состояние AD подтверждено. Запись перенесена в журнал.' if run.status == 'success'
+                else 'Состояние AD проверено. В задаче остались другие незавершённые цели.')

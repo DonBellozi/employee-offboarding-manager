@@ -892,7 +892,12 @@ class FinalDismissalLifecycleService:
             user = service.get_user_by_object_guid(
                 normalize(target.stable_id)
             )
-        if user is None and normalize(target.target_identifier):
+            if user is None:
+                if service.confirm_user_absent(object_guid=target.stable_id, username=target.target_identifier) is True:
+                    self._complete_target(target, status="already_completed", result="confirmed_absent")
+                    return
+                raise PermanentLifecycleError("Отсутствие AD-учётки не подтверждено; проверьте область поиска и повторное использование логина")
+        elif normalize(target.target_identifier):
             user = service.get_user(
                 normalize(target.target_identifier)
             )

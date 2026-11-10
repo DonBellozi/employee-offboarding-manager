@@ -21,7 +21,7 @@ from ldap3 import (
 )
 from ldap3.core.exceptions import LDAPException
 from ldap3.utils.conv import escape_bytes, escape_filter_chars
-from ldap3.utils.dn import escape_rdn
+from ldap3.utils.dn import escape_rdn, parse_dn
 
 from app.config import Settings
 
@@ -460,6 +460,36 @@ class ActiveDirectoryService:
                     if user is not None and user.object_guid:
                         result[user.object_guid.lower()] = user
         return result
+
+    def confirm_user_absent(self, *, object_guid: str, username: str = "") -> bool:
+        """Prove absence in the domain, not just in the configured users OU.
+
+        An unsuccessful/partial LDAP search is never evidence of deletion.
+        A reused login also prevents treating this identity as safely absent.
+        """
+        if not self.settings.ad_check_enabled:
+            raise RuntimeError("Проверка AD отключена")
+        guid = uuid.UUID(str(object_guid or "").strip().strip("{}"))
+        clauses = [f"(objectGUID={escape_bytes(guid.bytes_le)})"]
+        if str(username or "").strip():
+            clauses.append(f"(sAMAccountName={escape_filter_chars(username.strip())})")
+        with self._service_connection() as conn:
+            conn.search('', '(objectClass=*)', search_scope=BASE, attributes=['defaultNamingContext'])
+            if conn.result.get('result') != 0 or len(conn.entries) != 1:
+                raise RuntimeError("AD не подтвердила область поиска")
+            domain_dn = conn.entries[0]['defaultNamingContext'].value
+            if not isinstance(domain_dn, str) or not domain_dn.strip():
+                raise RuntimeError("AD не вернула корневой домен поиска")
+            def domain_parts(dn):
+                return tuple(value.casefold() for attr,value,_ in parse_dn(dn) if attr.casefold() == 'dc')
+            expected_domain = domain_parts(self.settings.ad_base_dn) if self.settings.ad_base_dn else ()
+            actual_domain = domain_parts(domain_dn)
+            if not actual_domain or (expected_domain and expected_domain != actual_domain):
+                raise RuntimeError("Подключён другой домен AD; отсутствие объекта не подтверждено")
+            conn.search(domain_dn, f"(|{''.join(clauses)})", attributes=['objectGUID','sAMAccountName'])
+            if conn.result.get('result') != 0:
+                raise RuntimeError("Поиск AD завершился без подтверждения отсутствия")
+            return len(conn.entries) == 0
 
     def get_user_by_object_guid(self, object_guid: str) -> ADDirectoryUser | None:
         normalized = str(object_guid or "").strip().strip("{}").lower()
