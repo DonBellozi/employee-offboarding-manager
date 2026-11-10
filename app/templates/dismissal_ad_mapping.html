@@ -3,7 +3,18 @@
 {% block content %}
 <h1>Сопоставление AD</h1>
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
-{% if saved %}<div class="alert success">Сопоставление сохранено. Результат увольнения проверит штатный фоновый цикл. Учётки не изменялись.</div>{% endif %}
+{% if saved %}<div class="alert success">Сопоставление сохранено. Учётки не изменялись.</div>{% endif %}
+{% if check_message|default('') %}<div class="alert {{ 'success' if completed else 'warning' }}">{{ check_message }}</div>{% endif %}
+{% if not completed|default(False) and mapping_by_source %}
+<section class="card">
+  <form method="post" action="/dismissals/{{ run.id }}/ad-mapping">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="check">
+    <button type="submit">Проверить завершение</button>
+  </form>
+  <p class="muted">Проверяет уже сохранённое сопоставление и состояние AD. Команды блокировки и восстановления не выполняются.</p>
+</section>
+{% endif %}
 <section class="card">
   <h2>{{ run.fio }}</h2>
   <p>Увольнение {{ run.dismissal_date.strftime('%d.%m.%Y') }}</p>
@@ -16,7 +27,7 @@
   </tbody></table>
   <p class="muted">Сохраняется общая AD-учётка для всех перечисленных организаций. Кадровые логины и почтовые сопоставления не меняются.</p>
 </section>
-{% if not saved %}
+{% if not saved and not completed|default(False) %}
 <section class="card">
   <form method="post" action="/dismissals/{{ run.id }}/ad-mapping" class="stack">
     <input type="hidden" name="csrf" value="{{ csrf }}">

@@ -5,10 +5,12 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.db import get_db
+from app.models import EmailLoginMapping
 from app.security import get_or_create_csrf, require_admin, validate_csrf
 from app.services.hr_registry_manual_mapping import (
     HRRegistryManualMappingService,
@@ -35,12 +37,12 @@ def dismissal_ad_mapping_page(run_id: int, request: Request, settings: Settings 
         raise HTTPException(409, str(exc)) from None
     return templates.TemplateResponse(request, 'dismissal_ad_mapping.html', {
         **context, 'user': current, 'csrf': get_or_create_csrf(request), 'login': '', 'candidate': None,
-        'error': '', 'saved': False,
+        'error': '', 'saved': False, 'check_message': '', 'completed': False,
     })
 
 
 @router.post('/dismissals/{run_id}/ad-mapping')
-def dismissal_ad_mapping_save(run_id: int, request: Request, login: str = Form(...), action: str = Form('preview'),
+def dismissal_ad_mapping_save(run_id: int, request: Request, login: str = Form(''), action: str = Form('preview'),
     expected_guid: str = Form(''), confirmed: bool = Form(False), csrf: str = Form(...),
     settings: Settings = Depends(get_settings), db: Session = Depends(get_db)):
     validate_csrf(request, csrf)
@@ -52,10 +54,14 @@ def dismissal_ad_mapping_save(run_id: int, request: Request, login: str = Form(.
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from None
     candidate, saved, error = None, False, ''
+    check_message = ''
     try:
         if action == 'save':
             service.save(run_id, login, expected_guid, current.username, confirmed)
             saved = True
+            check_message = service.confirm_disabled(run_id,current.username)
+        elif action == 'check':
+            check_message = service.confirm_disabled(run_id,current.username)
         elif action == 'preview':
             candidate = service.inspect(run_id, login)
         else:
@@ -63,9 +69,12 @@ def dismissal_ad_mapping_save(run_id: int, request: Request, login: str = Form(.
     except ValueError as exc:
         db.rollback()
         error = str(exc)
+    context['mapping_by_source'] = {m.source_domain.lower():m for m in db.scalars(select(EmailLoginMapping).where(
+        EmailLoginMapping.worker_key == context['run'].worker_key))}
     return templates.TemplateResponse(request, 'dismissal_ad_mapping.html', {
         **context, 'user': current, 'csrf': get_or_create_csrf(request), 'login': login,
-        'candidate': candidate, 'error': error, 'saved': saved,
+        'candidate': candidate, 'error': error, 'saved': saved, 'check_message': check_message,
+        'completed': context['run'].status == 'success',
     }, status_code=400 if error else 200)
 
 
