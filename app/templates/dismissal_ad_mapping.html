@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Сопоставление AD при увольнении{% endblock %}
+{% block content %}
+<h1>Сопоставление AD</h1>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+{% if saved %}<div class="alert success">Сопоставление сохранено. Результат увольнения проверит штатный фоновый цикл. Учётки не изменялись.</div>{% endif %}
+<section class="card">
+  <h2>{{ run.fio }}</h2>
+  <p>Увольнение {{ run.dismissal_date.strftime('%d.%m.%Y') }}</p>
+  <table class="journal-table"><thead><tr><th>Организация</th><th>Логин из кадровой истории</th><th>Связанная AD</th></tr></thead><tbody>
+  {% for record in records %}
+  {% set old_mapping = mapping_by_source.get(record.source_id|lower) %}
+  <tr><td>{{ record.source_name or record.source_id }}</td><td>{{ record.login or '—' }}</td>
+  <td>{% if old_mapping %}{{ old_mapping.ad_login or '—' }}<br><code>{{ old_mapping.ad_object_guid }}</code>{% else %}—{% endif %}</td></tr>
+  {% endfor %}
+  </tbody></table>
+  <p class="muted">Сохраняется общая AD-учётка для всех перечисленных организаций. Кадровые логины и почтовые сопоставления не меняются.</p>
+</section>
+{% if not saved %}
+<section class="card">
+  <form method="post" action="/dismissals/{{ run.id }}/ad-mapping" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="preview">
+    <label>Правильный логин AD<input name="login" value="{{ login }}" required autocomplete="off" maxlength="128"></label>
+    <button type="submit">Проверить AD</button>
+  </form>
+</section>
+{% if candidate %}
+<section class="card">
+  <h2>{{ candidate.display_name }}</h2>
+  <p><code>{{ candidate.username }}</code> · {{ 'Включена' if candidate.is_enabled else 'Заблокирована' }}</p>
+  <p>objectGUID: <code>{{ candidate.object_guid }}</code></p>
+  <form method="post" action="/dismissals/{{ run.id }}/ad-mapping" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="action" value="save">
+    <input type="hidden" name="login" value="{{ candidate.username }}">
+    <input type="hidden" name="expected_guid" value="{{ candidate.object_guid }}">
+    <label class="check-row"><input type="checkbox" name="confirmed" value="true" required>Подтверждаю: это AD-учётка данного работника для перечисленных организаций.</label>
+    <button type="submit">Сохранить сопоставление</button>
+  </form>
+</section>
+{% endif %}
+{% endif %}
+<a class="button secondary" href="/">В журнал</a>
+{% endblock %}

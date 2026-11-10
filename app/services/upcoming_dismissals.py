@@ -15,6 +15,7 @@ from app.models_dismissals import DismissalDeferral
 from app.models_dismissal_lifecycle import (
     FinalDismissalAutomationState,
     FinalDismissalBlockRun,
+    FinalDismissalBlockTarget,
 )
 from app.models_onec_sources import HREmploymentState, OneCAdditionalSource
 from app.models_preliminary_dismissals import PreliminaryDismissalItem
@@ -191,6 +192,11 @@ class UpcomingDismissalService:
             (item.worker_key, item.dismissal_date): item
             for item in block_runs
         }
+        conflict_run_ids = set(self.db.scalars(select(FinalDismissalBlockTarget.run_id).where(
+            FinalDismissalBlockTarget.system == 'ad',
+            FinalDismissalBlockTarget.target_key == 'ad:conflict',
+            FinalDismissalBlockTarget.status == 'intervention',
+        )))
         automation_state = self.db.scalar(
             select(FinalDismissalAutomationState)
             .order_by(FinalDismissalAutomationState.id)
@@ -351,6 +357,8 @@ class UpcomingDismissalService:
                     "preliminary": False,
                     "final_dismissal": final_dismissal,
                     "blocking_required": final_dismissal,
+                    "ad_mapping_run_id": block_run.id if block_run is not None
+                        and block_run.id in conflict_run_ids and final_dismissal else None,
                     "deferral_allowed": bool(
                         final_dismissal
                         and not (

@@ -99,6 +99,9 @@
                 <div class="upcoming-details-loading">Загружаю сохранённые данные…</div>
               </div>
             </details>
+          {% if user is defined and user and user.role == 'admin' and item.ad_mapping_run_id|default(None) %}
+          <a class="button secondary small" href="/dismissals/{{ item.ad_mapping_run_id }}/ad-mapping">Сопоставить AD</a>
+          {% endif %}
           {% if item.deferral_allowed %}
           <form method="post"
                 action="/dismissals/upcoming/defer"
