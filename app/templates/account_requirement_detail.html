@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Решение о необходимости УЗ{% endblock %}
 {% block content %}
-<h1>Необходимость корпоративной учетной записи</h1>
+<h1 data-workspace-page-title>Необходимость корпоративной учетной записи</h1>
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 <section class="card">
   <h2>{{ case.fio }}</h2>
@@ -13,7 +13,7 @@
   <p class="muted">{{ 'Кадровый снимок решения сохранен.' if case.decision_snapshot_json else 'Показаны текущие кадровые сведения; снимок будет сохранен при финальном ответе.' }} Уточнение: {{ 'да' if case.clarification_required else 'нет' }}.</p>
   {% include "account_requirement_controls.html" %}
   {% if case.state == 'decided' and case.decision == 'required' and not case.created_account and arrival_event_ids %}
-  <a class="button" href="/employees/new?arrival_event_ids={{ arrival_event_ids }}">Перейти к созданию / проверке учеток</a>
+  <a class="button" href="/employees/new?arrival_event_ids={{ arrival_event_ids }}" data-workspace-navigate>Перейти к созданию / проверке учеток</a>
   {% endif %}
   <p class="muted">Создание учеток: {{ case.external_action_status }}. Это не обучающая метка.</p>
 </section>

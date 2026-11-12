@@ -1,7 +1,16 @@
 {% extends "base.html" %}
-{% block title %}Новый работник{% endblock %}
+{% set creation_stage = parsed and (
+  not arrival_event_ids|default('')
+  or (arrival_accounts|default(None) and arrival_accounts.has_candidates and force_new|default(false))
+  or (requirement_case|default(None) and requirement_case.state == 'decided' and requirement_case.decision == 'required'
+      and not (arrival_accounts|default(None) and arrival_accounts.has_candidates and not force_new|default(false)))
+) %}
+{% block title %}{{ 'Проверка и создание учётных записей' if creation_stage else 'Новый работник' }}{% endblock %}
 {% block content %}
-<h1>Новый работник</h1>
+<h1 data-workspace-page-title>{{ 'Проверка и создание учётных записей' if creation_stage else 'Новый работник' }}</h1>
+{% if creation_stage and requirement_case|default(None) %}
+<p><a href="/account-requirements/{{ requirement_case.id }}" data-workspace-navigate>Изменить решение</a></p>
+{% endif %}
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 
 {% if not parsed %}
@@ -254,9 +263,9 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
 </div>
 {% endif %}
 
-{% if arrival_accounts|default(None) and arrival_event_ids|default('') and not arrival_accounts.has_candidates %}
-<section class="card">
-  <h2>Если учётные записи уже выдали вручную</h2>
+{% if arrival_accounts|default(None) and arrival_event_ids|default('') and not arrival_accounts.has_candidates and not creation_stage %}
+<details class="card">
+  <summary>Если учётные записи уже выдали вручную</summary>
   <p class="muted">
     Укажите фактический логин AD и адрес почты. Система проверит их напрямую,
     сопоставит с работником и не станет создавать дубли. Пароль вводить не
@@ -292,10 +301,10 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
       </button>
     </div>
   </form>
-</section>
+</details>
 {% endif %}
 
-{% if requirement_case|default(None) and requirement_case.state != 'cancelled' %}
+{% if requirement_case|default(None) and requirement_case.state != 'cancelled' and not creation_stage %}
 <section class="card">
   <h2>Необходимость корпоративной учетной записи</h2>
   <p>{{ requirement_case.fio }}</p>
@@ -307,7 +316,7 @@ document.getElementById('parse-form')?.addEventListener('submit', event => {
 </section>
 {% endif %}
 
-{% if not arrival_event_ids|default('') or (arrival_accounts|default(None) and arrival_accounts.has_candidates) or (requirement_case|default(None) and requirement_case.state == 'decided' and requirement_case.decision == 'required') %}
+{% if creation_stage %}
 <form method="post" action="/employees/provision" class="stack" id="provision-form">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="arrival_event_ids" value="{{ arrival_event_ids|default('') }}">

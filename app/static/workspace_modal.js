@@ -8,6 +8,7 @@
 
   let refreshOnClose = false;
   let changed = false;
+  let initialTitle = 'Окно';
 
   function modalUrl(href) {
     const url = new URL(href, window.location.origin);
@@ -18,7 +19,8 @@
   function openWorkspace(href, heading, shouldRefresh = false) {
     refreshOnClose = Boolean(shouldRefresh);
     changed = false;
-    title.textContent = heading || 'Окно';
+    initialTitle = heading || 'Окно';
+    title.textContent = initialTitle;
     frame.src = modalUrl(href);
 
     if (!dialog.open) {
@@ -60,6 +62,10 @@
       if (!childWindow || !childDocument?.body) return;
 
       childDocument.body.classList.add('workspace-embedded');
+      const pageTitle = childDocument.querySelector('[data-workspace-page-title]');
+      title.textContent = pageTitle?.textContent.trim() || initialTitle;
+      // Each navigation is a new action step, not an appended panel below it.
+      childWindow.scrollTo(0, 0);
 
       // A modal is an action workspace, not a second browser. Ordinary links
       // inside the embedded page must never turn the iframe into a navigable
