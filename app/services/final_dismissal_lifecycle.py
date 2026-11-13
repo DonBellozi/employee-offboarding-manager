@@ -49,6 +49,9 @@ POLL_SECONDS = 60
 # уже существующих ссылок в коде и тестах.
 SUCCESS_TARGET_STATUSES = {"completed", "already_completed"}
 LEGACY_NO_AD_ACCOUNT_ERROR = "Не найдена связанная учетная запись AD"
+MISSING_AD_ACCOUNT_ERROR = "Учетная запись AD не найдена"
+VERIFY_MISSING_AD = "verify_missing_ad"
+VERIFY_MISSING_AD_CONFLICT = "verify_missing_ad_plan_conflict"
 # На текущем этапе кадровое решение управляет только общей учеткой AD.
 SYSTEM_LABELS = {
     "ad": "AD",
@@ -757,10 +760,23 @@ class FinalDismissalLifecycleService:
                 )
             )
             if existing is not None:
-                if not plan["error"] and existing.status == "intervention" and existing.last_result == "ad_plan_conflict":
+                if (not plan["error"] and existing.status == "intervention"
+                        and existing.last_error == MISSING_AD_ACCOUNT_ERROR
+                        and not normalize(existing.stable_id)
+                        and normalize(existing.target_identifier)):
+                    # Repair the exact old missing-login failure by reading AD
+                    # only. Finding an account later must not trigger blocking.
+                    existing.status = "pending"
+                    existing.last_result = VERIFY_MISSING_AD
+                    existing.last_error = ""
+                    existing.next_attempt_at = utcnow()
+                if (not plan["error"] and existing.status == "intervention"
+                        and existing.last_result in {"ad_plan_conflict", VERIFY_MISSING_AD_CONFLICT}):
                     existing.status = "pending"
                     existing.last_error = ""
-                    existing.last_result = ""
+                    existing.last_result = (
+                        VERIFY_MISSING_AD if existing.last_result == VERIFY_MISSING_AD_CONFLICT else ""
+                    )
                     existing.next_attempt_at = utcnow()
                 if plan["error"] and existing.last_result == RESOLVED_AD_CONFLICT:
                     # A new ambiguity must become visible again, not inherit
@@ -867,7 +883,9 @@ class FinalDismissalLifecycleService:
         exc: Exception,
     ) -> None:
         target.last_error = str(exc)[:4000]
-        target.last_result = "error"
+        # Keep an old missing-account repair read-only across network retries.
+        if target.last_result != VERIFY_MISSING_AD:
+            target.last_result = "error"
         target.completed_at = None
         target.updated_at = utcnow()
         if (
@@ -888,6 +906,13 @@ class FinalDismissalLifecycleService:
     ) -> None:
         service = ActiveDirectoryService(self.settings)
         user = None
+        if target.last_result == VERIFY_MISSING_AD:
+            if service.confirm_login_absent(username=target.target_identifier) is True:
+                self._complete_target(target, status="already_completed", result="confirmed_absent")
+                return
+            raise PermanentLifecycleError(
+                "AD-учётка найдена при повторной проверке; подтвердите сопоставление"
+            )
         if normalize(target.stable_id):
             user = service.get_user_by_object_guid(
                 normalize(target.stable_id)
@@ -902,8 +927,12 @@ class FinalDismissalLifecycleService:
                 normalize(target.target_identifier)
             )
         if user is None:
+            if (normalize(target.target_identifier) and not normalize(target.stable_id)
+                    and service.confirm_login_absent(username=target.target_identifier) is True):
+                self._complete_target(target, status="already_completed", result="confirmed_absent")
+                return
             raise PermanentLifecycleError(
-                "Учетная запись AD не найдена"
+                "Отсутствие AD-учётки не подтверждено; проверьте сопоставление и область поиска"
             )
 
         target.target_identifier = user.username
@@ -1098,8 +1127,9 @@ class FinalDismissalLifecycleService:
                 records, mappings = self._records_and_mappings(run.worker_key)
                 current_plan = self._ad_plan(records, mappings)
                 if current_plan is not None and current_plan["error"]:
+                    absence_only = target.last_result == VERIFY_MISSING_AD
                     self._fail_target(target, PermanentLifecycleError(current_plan["error"]))
-                    target.last_result = "ad_plan_conflict"
+                    target.last_result = VERIFY_MISSING_AD_CONFLICT if absence_only else "ad_plan_conflict"
                     self.db.commit()
                     return
                 self._process_ad(target)
@@ -1239,6 +1269,7 @@ class FinalDismissalLifecycleService:
                 .where(
                     FinalDismissalBlockTarget.system == "ad",
                     FinalDismissalBlockTarget.status.in_(SUCCESS_TARGET_STATUSES),
+                    FinalDismissalBlockTarget.last_result != "confirmed_absent",
                 )
                 .order_by(FinalDismissalBlockRun.id.desc())
             ).all()

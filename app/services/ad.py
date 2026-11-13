@@ -12,6 +12,7 @@ from ldap3 import (
     BASE,
     NTLM,
     SIMPLE,
+    SUBTREE,
     Connection,
     MODIFY_ADD,
     MODIFY_DELETE,
@@ -473,8 +474,28 @@ class ActiveDirectoryService:
         clauses = [f"(objectGUID={escape_bytes(guid.bytes_le)})"]
         if str(username or "").strip():
             clauses.append(f"(sAMAccountName={escape_filter_chars(username.strip())})")
+        return self._confirm_domain_absence(clauses)
+
+    def confirm_login_absent(self, *, username: str) -> bool:
+        """Confirm that a planned login was never created or no longer exists.
+
+        This does not identify a deleted GUID or authorize touching a different
+        account. A match anywhere in the domain prevents this empty action.
+        """
+        if not self.settings.ad_check_enabled:
+            raise RuntimeError("Проверка AD отключена")
+        login = str(username or "").strip()
+        if not login:
+            raise ValueError("Не указан логин для проверки отсутствия AD-учётки")
+        return self._confirm_domain_absence([
+            f"(sAMAccountName={escape_filter_chars(login)})",
+        ])
+
+    def _confirm_domain_absence(self, clauses: list[str]) -> bool:
         with self._service_connection() as conn:
             conn.search('', '(objectClass=*)', search_scope=BASE, attributes=['defaultNamingContext'])
+            if conn.result.get('result') in {3, 51, 52, 81, 85, 91}:
+                raise RuntimeError("AD временно недоступна; область поиска не подтверждена")
             if conn.result.get('result') != 0 or len(conn.entries) != 1:
                 raise RuntimeError("AD не подтвердила область поиска")
             domain_dn = conn.entries[0]['defaultNamingContext'].value
@@ -486,9 +507,16 @@ class ActiveDirectoryService:
             actual_domain = domain_parts(domain_dn)
             if not actual_domain or (expected_domain and expected_domain != actual_domain):
                 raise RuntimeError("Подключён другой домен AD; отсутствие объекта не подтверждено")
-            conn.search(domain_dn, f"(|{''.join(clauses)})", attributes=['objectGUID','sAMAccountName'])
+            conn.search(domain_dn, f"(|{''.join(clauses)})", search_scope=SUBTREE,
+                        attributes=['objectGUID','sAMAccountName'])
             if conn.result.get('result') != 0:
+                if conn.result.get('result') in {3, 51, 52, 81, 85, 91}:
+                    raise RuntimeError("AD временно недоступна; отсутствие учётки не подтверждено")
                 raise RuntimeError("Поиск AD завершился без подтверждения отсутствия")
+            if conn.result.get('referrals') or any(
+                item.get('type') == 'searchResRef' for item in (getattr(conn, 'response', None) or [])
+            ):
+                raise RuntimeError("AD вернула перенаправление; отсутствие учётки не подтверждено")
             return len(conn.entries) == 0
 
     def get_user_by_object_guid(self, object_guid: str) -> ADDirectoryUser | None:
