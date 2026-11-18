@@ -34,6 +34,7 @@ from app.routers import (
 )
 from app.security import CSRFMismatchError, ensure_bootstrap_admin
 from app.services.blocking_worker import BlockingQueueWorker
+from app.services.blocking_directory import BlockingDirectoryWorker
 from app.services.account_requirement_worker import AccountRequirementWorker
 from app.services.dismissal_notifications import DismissalNotificationWorker
 from app.services.dismissal_details_cache import DismissalDetailsSnapshotWorker
@@ -74,6 +75,7 @@ async def lifespan(_: FastAPI):
 
     onec_scheduler = OneCAutoImportScheduler(settings, SessionLocal)
     blocking_worker = BlockingQueueWorker(settings, SessionLocal)
+    blocking_directory_worker = BlockingDirectoryWorker(settings, SessionLocal)
     dismissal_notification_worker = DismissalNotificationWorker(
         settings,
         SessionLocal,
@@ -104,6 +106,7 @@ async def lifespan(_: FastAPI):
     account_requirement_worker = AccountRequirementWorker(settings, SessionLocal)
     onec_scheduler.start()
     blocking_worker.start()
+    blocking_directory_worker.start()
     dismissal_notification_worker.start()
     dismissal_details_worker.start()
     final_dismissal_worker.start()
@@ -117,6 +120,7 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        blocking_directory_worker.stop()
         account_requirement_worker.stop()
         techexpert_worker.stop()
         zimbra_employment_worker.stop()

@@ -4,7 +4,7 @@
 <div class="heading-row">
   <div>
     <h1>Блокировка</h1>
-    <p class="muted">Найдите работника по ФИО, логину, корпоративной или личной почте.</p>
+    <p class="muted">Поиск по ФИО, логину или email — среди всех работников и учётных записей.</p>
   </div>
   {% if card %}<a class="button secondary" href="/blocking">Новый поиск</a>{% endif %}
 </div>
@@ -73,6 +73,15 @@
   </form>
 </section>
 
+{% if directory_status is defined %}
+<p class="muted">Справочник AD/Zimbra обновляется в фоне каждые 6 часов.
+{% for state in directory_status %}
+  {{ 'AD' if state.system == 'ad' else 'Zimbra' }}:
+  {% if state.last_success_at %}{{ state.last_success_at|app_datetime }}{% else %}ожидает обновления{% endif %}{% if state.error %} · {{ state.error }}{% endif %}.
+{% endfor %}
+</p>
+{% endif %}
+
 {% if query and not error %}
 <section class="card">
   <div class="blocking-results-heading">
@@ -85,7 +94,8 @@
       <thead>
         <tr>
           <th>ФИО</th>
-          <th>Логин AD</th>
+          <th>Источник</th>
+          <th>Логин</th>
           <th>Корпоративная почта</th>
           <th>AD</th>
           <th>Zimbra</th>
@@ -96,6 +106,7 @@
         {% for row in rows %}
         <tr>
           <td><strong>{{ row.fio }}</strong></td>
+          <td>{{ row.origin }}</td>
           <td><code>{{ row.login or '–' }}</code></td>
           <td>{{ row.email or '–' }}</td>
           <td>{{ row.ad_label }}</td>

@@ -27,6 +27,7 @@ def directory(monkeypatch, *, code=0, found=False, root='DC=example,DC=test', re
         conn.calls.append((base, query, kwargs))
         if len(conn.calls) == 1:
             conn.entries = [{'defaultNamingContext': SimpleNamespace(value=root)}]
+            conn.response = [{'type': 'searchResEntry', 'attributes': {'defaultNamingContext': [root]}}]
             conn.result = {'result': root_code}
         else:
             conn.entries = [object()] if found else []

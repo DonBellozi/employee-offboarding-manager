@@ -160,6 +160,8 @@ class BlockingQueueService:
 
     @staticmethod
     def _target_label(item: BlockingQueueItem) -> str:
+        if item.last_result == 'not_applicable':
+            return 'Отсутствует'
         labels = {
             "ad": {
                 "pending": "Ожидает блокировки",
@@ -231,7 +233,7 @@ class BlockingQueueService:
         user = None
         if item.stable_id.strip():
             user = service.get_user_by_object_guid(item.stable_id.strip())
-        if user is None and item.target_identifier.strip():
+        if user is None and not item.stable_id.strip() and item.target_identifier.strip():
             user = service.get_user(item.target_identifier.strip())
         if user is None:
             raise PermanentBlockingError("Учетная запись AD не найдена")
@@ -244,7 +246,7 @@ class BlockingQueueService:
             identity = service.accounts_by_ids([item.stable_id.strip()]).get(
                 item.stable_id.strip()
             )
-        if identity is None and item.target_identifier.strip():
+        if identity is None and not item.stable_id.strip() and item.target_identifier.strip():
             identity = service.account_by_address(item.target_identifier.strip())
         if identity is None:
             raise PermanentBlockingError("Учетная запись Zimbra не найдена")
@@ -314,7 +316,9 @@ class BlockingQueueService:
         item.attempts += 1
         item.last_attempt_at = utcnow()
         try:
-            if item.system == "ad":
+            if not item.stable_id.strip() and not item.target_identifier.strip():
+                self._complete_item(item, status='already_completed', result='not_applicable')
+            elif item.system == "ad":
                 self._process_ad(item)
             elif item.system == "zimbra":
                 self._process_zimbra(item)

@@ -20,9 +20,11 @@ def directory(monkeypatch, *, final_code=0, found=False, root_code=0, root_dn='D
         conn.calls.append((base,query,kwargs))
         if len(conn.calls)==1:
             conn.entries=[{'defaultNamingContext':SimpleNamespace(value=root_dn)}]
+            conn.response=[{'type':'searchResEntry','attributes':{'defaultNamingContext':[root_dn]}}]
             conn.result={'result':root_code}
         else:
             conn.entries=[object()] if found else []
+            conn.response=[]
             conn.result={'result':final_code}
         return False  # Empty successful searches may return False in ldap3.
     conn.search=search

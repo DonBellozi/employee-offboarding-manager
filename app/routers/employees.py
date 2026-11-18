@@ -1311,6 +1311,7 @@ def blocking_search(
     settings: Settings = Depends(get_settings),
 ):
     get_current_user(request)
+    from app.services.blocking_directory import BlockingDirectoryService
     query = q.strip()
     rows: list[dict] = []
     error = ""
@@ -1333,6 +1334,7 @@ def blocking_search(
             result=None,
             error=error,
             dry_run=settings.dry_run,
+            directory_status=BlockingDirectoryService(settings, db).status(),
         ),
     )
 
@@ -1347,7 +1349,7 @@ def blocking_card(
     get_current_user(request)
     try:
         service = BlockingService(settings, db)
-        card = service.card(record_id)
+        card = service.card(record_id, allow_manual_history=True)
         latest_result = service.latest_result_for_record(record_id)
         return templates.TemplateResponse(
             request,
@@ -1453,7 +1455,7 @@ def block_employee_accounts(
     try:
         result = service.block(record_id, user.username)
         try:
-            card = service.card(record_id)
+            card = service.card(record_id, allow_manual_history=True)
         except Exception:
             card = None
         return templates.TemplateResponse(
@@ -1471,7 +1473,7 @@ def block_employee_accounts(
         )
     except Exception as exc:
         try:
-            card = service.card(record_id)
+            card = service.card(record_id, allow_manual_history=True)
         except Exception:
             card = None
         return templates.TemplateResponse(
@@ -1507,7 +1509,7 @@ def retry_blocking_operation(
     service = BlockingService(settings, db)
     try:
         result = service.retry_operation(operation_id)
-        card = service.card(operation.source_record_id)
+        card = service.card(operation.source_record_id, allow_manual_history=True)
         return templates.TemplateResponse(
             request,
             "blocking.html",
@@ -1523,7 +1525,7 @@ def retry_blocking_operation(
         )
     except Exception as exc:
         try:
-            card = service.card(operation.source_record_id)
+            card = service.card(operation.source_record_id, allow_manual_history=True)
         except Exception:
             card = None
         return templates.TemplateResponse(

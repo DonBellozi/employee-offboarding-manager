@@ -24,7 +24,8 @@ from app.services.blocking_queue import (
     BlockingQueueService,
     BlockingTargetView,
 )
-from app.services.hr_registry import HRRegistryService
+from app.models_blocking_directory import BlockingDirectoryAccount
+from app.services.blocking_directory import BlockingDirectoryService, normalized
 from app.services.itinvent import (
     ITInventEmployeeAssets,
     ITInventEquipment,
@@ -158,11 +159,56 @@ class BlockingService:
         text = str(query or "").strip()
         if len(text) < 2:
             return []
-        return HRRegistryService(self.settings, self.db).list_rows(
-            query=text,
-            status="all",
-            limit=max(1, min(limit, 200)),
-        )
+        terms = normalized(text).split()
+        rows = []
+        mappings = {(row.worker_key, row.source_domain): row
+                    for row in self.db.scalars(select(EmailLoginMapping)).all()}
+        seen = set()
+        for record in self.db.scalars(select(HRSourceRecord).order_by(HRSourceRecord.fio)).all():
+            mapping = mappings.get((record.worker_key, record.source_id))
+            login = mapping.ad_login if mapping and mapping.ad_login else record.login
+            email = mapping.zimbra_email if mapping and mapping.zimbra_email else record.corporate_email
+            haystack = normalized(' '.join((record.fio, login, email, record.personal_email,
+                                           record.login, record.corporate_email)))
+            if not all(term in haystack for term in terms):
+                continue
+            rows.append(dict(id=record.id, fio=record.fio, login=login, email=email,
+                origin='Кадровый реестр' if record.is_present else 'История работников',
+                ad_label=self._search_status(record.ad_status), zimbra_label=self._search_status(record.zimbra_status)))
+            seen.add((normalized(login), normalized(email)))
+        for account in BlockingDirectoryService(self.settings, self.db).search(text):
+            if (normalized(account.login), normalized(account.email)) in seen:
+                continue
+            rows.append(dict(id=-account.id, fio=account.fio or account.login or account.email,
+                login=account.ad_login or account.login, email=account.email,
+                origin={'ad': 'AD', 'zimbra': 'Zimbra', 'created': 'Создана через систему'}[account.system],
+                ad_label=self._search_status(account.status) if account.system == 'ad' else 'Проверка при открытии' if account.ad_login else '—',
+                zimbra_label=self._search_status(account.status) if account.system == 'zimbra' else 'Проверка при открытии' if account.zimbra_email else '—'))
+        return rows[:max(1, min(limit, 200))]
+
+    @staticmethod
+    def _search_status(value):
+        return {'active': 'Активна', 'disabled': 'Заблокирована', 'closed': 'Закрыта',
+                'locked': 'Заблокирована', 'missing': 'Не найдена', 'present': 'Есть',
+                'not_checked': 'Не проверено', 'error': 'Ошибка проверки',
+                'unknown': 'Не проверено'}.get(value, value or 'Не проверено')
+
+    def _record(self, record_id: int) -> HRSourceRecord:
+        if record_id < 0:
+            account = self.db.get(BlockingDirectoryAccount, -record_id)
+            if account is None:
+                raise LookupError("Учётная запись не найдена в справочнике")
+            # A transient adapter: directory discoveries must not become HR
+            # employments or participate in automatic dismissal decisions.
+            return HRSourceRecord(id=record_id,
+                worker_key=BlockingDirectoryService.worker_key(account), source_id='blocking-directory',
+                source_name=account.system, fio=account.fio or account.login or account.email,
+                login=account.ad_login, corporate_email=account.zimbra_email,
+                placements_json='[]', is_present=True)
+        record = self.db.get(HRSourceRecord, record_id)
+        if record is None:
+            raise LookupError("Работник не найден")
+        return record
 
     @staticmethod
     def _placements(record: HRSourceRecord) -> tuple[str, ...]:
@@ -180,6 +226,11 @@ class BlockingService:
         return tuple(result)
 
     def _mapping(self, record: HRSourceRecord) -> EmailLoginMapping | None:
+        if record.id < 0:
+            account = self.db.get(BlockingDirectoryAccount, -record.id)
+            return EmailLoginMapping(worker_key=record.worker_key, source_domain=record.source_id,
+                ad_login=account.ad_login, ad_object_guid=account.ad_guid,
+                zimbra_email=account.zimbra_email, zimbra_id=account.zimbra_id)
         return self.db.scalar(
             select(EmailLoginMapping).where(
                 EmailLoginMapping.worker_key == record.worker_key,
@@ -381,9 +432,7 @@ class BlockingService:
         return ""
 
     def refresh_itinvent(self, record_id: int) -> BlockingITInventResult:
-        record = self.db.get(HRSourceRecord, record_id)
-        if record is None or not record.is_present:
-            raise LookupError("Работник не найден в текущем кадровом реестре")
+        record = self._record(record_id)
         result = self._itinvent_lookup(self._itinvent_login_for_record(record))
         if result.state in {"found", "owner_not_found"}:
             self._remember_itinvent(record, result)
@@ -395,12 +444,14 @@ class BlockingService:
         *,
         remember_itinvent: bool = True,
         allow_historical: bool = False,
+        allow_manual_history: bool = False,
     ) -> BlockingCard:
         if allow_historical and remember_itinvent:
             raise ValueError("Историческая карточка доступна только для чтения")
-        record = self.db.get(HRSourceRecord, record_id)
-        if record is None or (not record.is_present and not allow_historical):
-            raise LookupError("Работник не найден в текущем кадровом реестре")
+        record = self._record(record_id)
+        if not record.is_present and not (allow_historical or allow_manual_history):
+            raise LookupError("Работник отсутствует в текущем кадровом реестре")
+        directory_account = record_id < 0
 
         mapping = self._mapping(record)
         ad_user: ADDirectoryUser | None = None
@@ -424,7 +475,7 @@ class BlockingService:
                     z_identity = zimbra_service.accounts_by_ids(
                         [zimbra_target_id]
                     ).get(zimbra_target_id)
-                if z_identity is None:
+                if z_identity is None and not zimbra_target_id:
                     z_identity = zimbra_service.account_by_address(
                         zimbra_target_email
                     )
@@ -440,7 +491,7 @@ class BlockingService:
         )
         if mapping is not None and mapping.ad_login.strip():
             candidate_login = mapping.ad_login.strip().lower()
-        elif z_identity is not None:
+        elif z_identity is not None and not directory_account:
             candidate_login = z_identity.login.strip().lower()
         else:
             candidate_login = record.login.strip().lower()
@@ -450,7 +501,7 @@ class BlockingService:
                 ad_service = ActiveDirectoryService(self.settings)
                 if ad_target_guid:
                     ad_user = ad_service.get_user_by_object_guid(ad_target_guid)
-                if ad_user is None and candidate_login:
+                if ad_user is None and candidate_login and not ad_target_guid:
                     ad_user = ad_service.get_user(candidate_login)
                 if ad_user is not None:
                     candidate_login = ad_user.username
@@ -572,7 +623,7 @@ class BlockingService:
         return self.operation_result(operation.id)
 
     def block(self, record_id: int, operator: str) -> BlockingResult:
-        first = self.card(record_id)
+        first = self.card(record_id, allow_manual_history=True)
         lock_key = first.worker_key or first.effective_login or str(record_id)
         lock = self._lock_for(lock_key)
         if not lock.acquire(blocking=False):
@@ -596,7 +647,7 @@ class BlockingService:
             # идентификаторы все равно попадут в очередь и будут обработаны позже.
             # Для IT Invent при ошибке используется только последний успешно
             # сохраненный снимок с тем же доменным логином.
-            card = self.card(record_id)
+            card = self.card(record_id, allow_manual_history=True)
             equipment, equipment_snapshot = self._equipment_snapshot(card)
             operation = BlockingOperation(
                 worker_key=card.worker_key,

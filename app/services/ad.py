@@ -307,6 +307,40 @@ class ActiveDirectoryService:
                 return None
             return self._entry_to_directory_user(conn.entries[0])
 
+    def directory_users(self) -> list[ADDirectoryUser]:
+        """Read the configured AD subtree in pages, without changing accounts."""
+        if not self.settings.ad_check_enabled:
+            raise RuntimeError("Проверка AD отключена")
+        users = []
+        with self._service_connection() as conn:
+            cookie = None
+            seen_cookies = set()
+            while True:
+                conn.search(self.settings.ad_base_dn,
+                    '(&(objectCategory=person)(objectClass=user))', search_scope=SUBTREE,
+                    attributes=['sAMAccountName', 'displayName', 'mail', 'userAccountControl',
+                                'distinguishedName', 'objectGUID', 'accountExpires'],
+                    paged_size=500, paged_cookie=cookie)
+                if conn.result.get('result') != 0 or any(
+                    entry.get('type') == 'searchResRef' for entry in (conn.response or [])
+                ):
+                    raise RuntimeError("Не удалось полностью прочитать справочник AD")
+                for entry in conn.entries:
+                    user = self._entry_to_directory_user(entry)
+                    if user is not None and user.object_guid:
+                        users.append(user)
+                controls = conn.result.get('controls', {})
+                page = controls.get('1.2.840.113556.1.4.319')
+                if page is None:
+                    raise RuntimeError("AD не подтвердила постраничную выгрузку")
+                cookie = page.get('value', {}).get('cookie')
+                if not cookie:
+                    break
+                if cookie in seen_cookies:
+                    raise RuntimeError("AD повторила страницу справочника")
+                seen_cookies.add(cookie)
+        return users
+
     def users_by_email(self, email: str, limit: int = 10) -> list[ADDirectoryUser]:
         """Найти существующие AD-учетки по точному корпоративному e-mail.
 
@@ -493,12 +527,28 @@ class ActiveDirectoryService:
 
     def _confirm_domain_absence(self, clauses: list[str]) -> bool:
         with self._service_connection() as conn:
-            conn.search('', '(objectClass=*)', search_scope=BASE, attributes=['defaultNamingContext'])
+            # RootDSE operational attributes are not part of the ordinary user
+            # schema. Disable only this client-side name check, not validation
+            # of subsequent user/GUID searches or verification of LDAP results.
+            check_names = getattr(conn, 'check_names', True)
+            try:
+                conn.check_names = False
+                conn.search('', '(objectClass=*)', search_scope=BASE, attributes=['defaultNamingContext'])
+                # Do not construct ldap3 Entry/ObjectDef for RootDSE either:
+                # that abstraction validates against the ordinary schema again.
+                root_entries = [item for item in (conn.response or []) if item.get('type') == 'searchResEntry']
+            finally:
+                conn.check_names = check_names
             if conn.result.get('result') in {3, 51, 52, 81, 85, 91}:
                 raise RuntimeError("AD временно недоступна; область поиска не подтверждена")
-            if conn.result.get('result') != 0 or len(conn.entries) != 1:
+            if conn.result.get('result') != 0 or len(root_entries) != 1:
                 raise RuntimeError("AD не подтвердила область поиска")
-            domain_dn = conn.entries[0]['defaultNamingContext'].value
+            attributes = {key.casefold(): value for key, value in root_entries[0].get('attributes', {}).items()}
+            domain_dn = attributes.get('defaultnamingcontext')
+            if isinstance(domain_dn, (list, tuple)):
+                domain_dn = domain_dn[0] if len(domain_dn) == 1 else None
+            if isinstance(domain_dn, bytes):
+                domain_dn = domain_dn.decode('utf-8')
             if not isinstance(domain_dn, str) or not domain_dn.strip():
                 raise RuntimeError("AD не вернула корневой домен поиска")
             def domain_parts(dn):

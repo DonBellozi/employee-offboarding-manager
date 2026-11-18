@@ -746,6 +746,37 @@ class ZimbraService:
         flush()
         return accounts
 
+    def directory_accounts(self) -> list[dict]:
+        """Read account names and stable IDs for manual search; no mutations."""
+        domains = {domain.strip().lower() for domain in self.settings.zimbra_domains if domain.strip()}
+        if not self.settings.zimbra_check_enabled or self.settings.zimbra_backend == 'disabled' or not domains:
+            raise RuntimeError("Не настроено чтение справочника Zimbra")
+        with self._query_lock:
+            client = self._client()
+            try:
+                stdin, stdout, stderr = client.exec_command(f'{self._zmprov_command()} -l gaa -v', timeout=190)
+                stdin.channel.shutdown_write()
+                code, output, error = self._read_remote_command(stdout, stderr, timeout=190)
+                if code != 0:
+                    raise RuntimeError(f'Не удалось прочитать справочник Zimbra: {error or code}')
+            finally:
+                client.close()
+        names = {}
+        for block in output.split('# name ')[1:]:
+            attrs = {}
+            for line in block.splitlines()[1:]:
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    if key.lower() in {'displayname', 'cn', 'zimbraid'}:
+                        attrs[key.lower()] = value.strip()
+            if attrs.get('zimbraid'):
+                names[attrs['zimbraid']] = attrs.get('displayname') or attrs.get('cn', '')
+        result = []
+        for identity in self._parse_search_accounts(output):
+            if identity.primary_email.rsplit('@', 1)[-1] in domains:
+                result.append({'identity': identity, 'fio': names.get(identity.zimbra_id, '')})
+        return result
+
     def _search_accounts(
         self,
         ldap_query: str,

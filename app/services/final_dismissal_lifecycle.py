@@ -731,6 +731,18 @@ class FinalDismissalLifecycleService:
         if ad is not None:
             plans.append(ad)
 
+        if ad is None or not ad["error"]:
+            for target in self._targets(run.id):
+                if (target.system == 'ad' and target.status == 'intervention'
+                        and normalize(target.last_error) == 'invalid attribute type defaultnamingcontext'
+                        and (normalize(target.target_identifier) or normalize(target.stable_id))):
+                    # The old identity remains checkable even after its HR login
+                    # disappeared. This repair may only prove absence, never block.
+                    target.status = 'pending'
+                    target.last_result = VERIFY_MISSING_AD
+                    target.last_error = ''
+                    target.next_attempt_at = utcnow()
+
         conflict = self.db.scalar(select(FinalDismissalBlockTarget).where(
             FinalDismissalBlockTarget.run_id == run.id,
             FinalDismissalBlockTarget.system == "ad",
@@ -760,10 +772,11 @@ class FinalDismissalLifecycleService:
                 )
             )
             if existing is not None:
+                old_missing_login = (existing.last_error == MISSING_AD_ACCOUNT_ERROR
+                                     and not normalize(existing.stable_id))
                 if (not plan["error"] and existing.status == "intervention"
-                        and existing.last_error == MISSING_AD_ACCOUNT_ERROR
-                        and not normalize(existing.stable_id)
-                        and normalize(existing.target_identifier)):
+                        and old_missing_login
+                        and (normalize(existing.target_identifier) or normalize(existing.stable_id))):
                     # Repair the exact old missing-login failure by reading AD
                     # only. Finding an account later must not trigger blocking.
                     existing.status = "pending"
@@ -907,7 +920,12 @@ class FinalDismissalLifecycleService:
         service = ActiveDirectoryService(self.settings)
         user = None
         if target.last_result == VERIFY_MISSING_AD:
-            if service.confirm_login_absent(username=target.target_identifier) is True:
+            absent = (
+                service.confirm_user_absent(object_guid=target.stable_id, username=target.target_identifier)
+                if normalize(target.stable_id)
+                else service.confirm_login_absent(username=target.target_identifier)
+            )
+            if absent is True:
                 self._complete_target(target, status="already_completed", result="confirmed_absent")
                 return
             raise PermanentLifecycleError(
