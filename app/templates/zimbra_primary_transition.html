@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Переход между организациями{% endblock %}
+{% block content %}
+<h1 data-workspace-page-title>Переход между организациями</h1>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+<section class="card">
+  <h2>{{ action.fio or 'Работник' }}</h2>
+  <p>Сотрудник продолжает работать в другой организации. Нужно сменить основной адрес этого же ящика.</p>
+  <dl class="blocking-details">
+    <dt>Прежний адрес</dt><dd>{{ spec.target_address if spec else job.old_address if job else action.target_address }}</dd>
+    <dt>Новый основной адрес</dt><dd>{{ spec.replacement_address if spec else job.new_address if job else action.replacement_address }}</dd>
+  </dl>
+  <p>Сначала система создаст резервную копию. Затем сменит основной адрес и удалит прежний адрес. Письма и остальные адреса ящика сохранятся. Пароль почты не меняется.</p>
+  {% if not backup_allowed %}
+  <div class="alert warning">Резервное копирование выключено. Администратор должен разрешить его в настройках Zimbra.</div>
+  {% if user.role == 'admin' %}<a href="/settings/zimbra-lifecycle">Открыть настройки Zimbra</a>{% endif %}
+  {% endif %}
+  {% if job and job.status != 'cancelled' %}
+  <p><strong>{{ transition_statuses.get(job.status, job.status) }}</strong> · {{ phase_labels.get(job.phase, job.phase) }}</p>
+  {% if job.last_error %}<div class="alert warning">{{ job.last_error }}</div>{% endif %}
+  {% if job.backup_path %}
+  <details><summary>Резервная копия готова</summary><p><code>{{ job.backup_path }}</code></p><p>{{ job.backup_size_bytes }} байт</p></details>
+  {% endif %}
+  {% if job.status in ['queued','running','waiting_hr'] %}
+    <p class="muted">Обработка выполняется в фоне. Окно можно закрыть; состояние обновится автоматически.</p>
+  {% elif job.status == 'failed' %}
+    <form method="post" action="/zimbra-transitions/{{ action.id }}/retry">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit">Повторить проверку и продолжить</button>
+    </form>
+  {% elif job.status == 'completed' %}
+    <div class="alert success">Основной адрес изменён, прежний адрес удалён. Ящик остаётся активным.</div>
+  {% endif %}
+  {% if job.status in ['queued','waiting_hr','failed'] and job.phase in ['backup','rename'] %}
+  <form method="post" action="/zimbra-transitions/{{ action.id }}/cancel">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="button secondary">Отменить задание, если адреса ещё не изменены</button>
+  </form>
+  {% endif %}
+  {% elif spec and backup_allowed %}
+  <form method="post" action="/zimbra-transitions/{{ action.id }}" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="expected_old" value="{{ spec.target_address }}">
+    <input type="hidden" name="expected_new" value="{{ spec.replacement_address }}">
+    <label style="display:flex; gap:10px; align-items:flex-start"><input style="width:auto; flex:0 0 auto; margin-top:3px" type="checkbox" name="confirmed" value="true" required><span>Подтверждаю смену основного адреса и удаление прежнего.</span></label>
+    <button type="submit">Сменить основной адрес</button>
+  </form>
+  {% endif %}
+  <p><a href="/zimbra-transitions/{{ action.id }}" data-workspace-navigate>Обновить сведения</a></p>
+</section>
+{% if job and job.status in ['queued','running','waiting_hr'] %}
+<script>window.setTimeout(() => window.location.reload(), 10000);</script>
+{% endif %}
+{% endblock %}

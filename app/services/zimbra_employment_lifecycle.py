@@ -17,6 +17,7 @@ from app.models_onec_sources import HREmploymentState
 from app.models_zimbra_lifecycle import (
     ZimbraEmploymentAction,
     ZimbraLifecycleSettings,
+    ZimbraPrimaryTransition,
 )
 from app.services.blocking_window import is_block_window_open
 from app.services.onec_freshness import OneCSourceFreshnessService
@@ -228,9 +229,8 @@ class ZimbraEmploymentLifecycleService:
                         replacement=replacement,
                         deferrals=deferrals,
                         details=(
-                            "Основной адрес относится к завершенной занятости, "
-                            "но alias того же физического ящика остается активным. "
-                            "Требуется backup и решение оператора о смене primary."
+                            "Сотрудник продолжает работать в другой организации. "
+                            "Подтвердите смену основного адреса после резервного копирования."
                         ),
                     )
                 ]
@@ -613,6 +613,7 @@ class ZimbraEmploymentLifecycleService:
         if row.status == "cancelled":
             row.status = "pending"
             row.cancelled_at = None
+            row.last_error = ""
         return row
 
     def _cancel_stale(self, current_keys: set[str]) -> None:
@@ -625,6 +626,10 @@ class ZimbraEmploymentLifecycleService:
         )
         for row in rows:
             if row.plan_key in current_keys:
+                continue
+            transition = self.db.scalar(select(ZimbraPrimaryTransition).where(
+                ZimbraPrimaryTransition.action_id == row.id))
+            if transition is not None and transition.status in {'queued', 'running', 'waiting_hr', 'failed'}:
                 continue
             row.status = "cancelled"
             row.cancelled_at = utcnow()
@@ -641,8 +646,22 @@ class ZimbraEmploymentLifecycleService:
         return row
 
     def _execute(self, row: ZimbraEmploymentAction) -> bool:
+        transition = self.db.scalar(select(ZimbraPrimaryTransition).where(
+            ZimbraPrimaryTransition.zimbra_id == row.zimbra_id,
+            ZimbraPrimaryTransition.phase == 'rename',
+            ZimbraPrimaryTransition.status.in_({'queued','running','waiting_hr','failed'})))
+        if transition is not None:
+            # The active alias may be briefly detached before rename. Do not
+            # mistake this intermediate state for a mailbox without employment.
+            row.status = 'intervention' if row.id == transition.action_id else 'pending'
+            row.last_error = '' if row.id == transition.action_id else 'Ожидает завершения смены основного адреса'
+            return False
+        if not self._ready():
+            row.status = 'pending'
+            row.last_error = 'Ожидается завершение импорта и свежая кадровая выгрузка'
+            return False
         current = {spec.plan_key: spec for spec in self._current_specs()}
-        if row.plan_key not in current or not self._ready():
+        if row.plan_key not in current:
             row.status = "cancelled"
             row.cancelled_at = utcnow()
             row.last_error = "Повторная HR-проверка отменила действие"
@@ -650,6 +669,7 @@ class ZimbraEmploymentLifecycleService:
 
         if row.action in {"transition", "manual_review"}:
             row.status = "intervention"
+            row.last_error = ""
             return False
         config = self._settings()
         if row.action == "remove_alias" and not config.allow_alias_remove:

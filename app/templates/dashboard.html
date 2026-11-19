@@ -180,23 +180,28 @@
         </tr>
         {% endfor %}
         {% for item in zimbra_attention_actions %}
-        <tr>
+        <tr data-zimbra-transition="{{ item.id }}"{% if item.transition_job|default(None) and item.transition_job.status in ['queued','running','waiting_hr'] %} data-transition-running{% endif %}>
           <td><strong>{{ item.fio or item.worker_key }}</strong></td>
           <td>Zimbra</td>
           <td>
             {{ item.target_address }}
             {% if item.replacement_address %}
-            <div class="muted">Предлагаемый primary: {{ item.replacement_address }}</div>
+            <div class="muted">Новый основной адрес: {{ item.replacement_address }}</div>
             {% endif %}
           </td>
           <td>
-            <span class="status failed">
-              {{ 'Переход требует решения' if item.action == 'transition' else 'Ошибка' }}
+            {% set transition_job = item.transition_job|default(None) %}
+            <span class="status {{ 'running' if transition_job and transition_job.status in ['queued','running','waiting_hr'] else 'failed' }}">
+              {% if transition_job %}{{ {'queued':'В очереди','running':'Смена адреса выполняется','waiting_hr':'Ожидает проверки','failed':'Нужна проверка'}.get(transition_job.status, 'Переход требует решения') }}
+              {% else %}{{ 'Переход требует решения' if item.action == 'transition' else 'Ошибка' }}{% endif %}
             </span>
             <div class="muted">{{ item.details }}</div>
+            <div class="journal-error" data-transition-error>{% if transition_job %}{{ transition_job.last_error }}{% endif %}</div>
             {% if item.last_error %}<div class="journal-error">{{ item.last_error }}</div>{% endif %}
           </td>
-          <td>–</td>
+          <td>{% if item.action == 'transition' %}
+            <a class="button secondary" href="/zimbra-transitions/{{ item.id }}" data-workspace-modal data-workspace-refresh="true" data-workspace-title="Переход между организациями">Разобрать</a>
+          {% else %}–{% endif %}</td>
         </tr>
         {% endfor %}
         {% for row in techexpert_attention_notifications %}
@@ -410,4 +415,32 @@
   </table>
 </section>
 <script src="/static/upcoming_dismissals.js" defer></script>
+<script>
+(() => {
+  async function pollTransitions() {
+    const rows = [...document.querySelectorAll('[data-transition-running]')];
+    if (!rows.length) return;
+    await Promise.all(rows.map(async row => {
+      try {
+        const response = await fetch(`/zimbra-transitions/${row.dataset.zimbraTransition}/status`, {cache: 'no-store'});
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data.status === 'completed') {
+          const section = row.closest('section');
+          row.remove();
+          if (section && !section.querySelector('tbody tr')) section.hidden = true;
+          return;
+        }
+        row.querySelector('.status').textContent = data.label;
+        row.querySelector('[data-transition-error]').textContent = data.error || '';
+        if (!['queued','running','waiting_hr'].includes(data.status)) {
+          row.removeAttribute('data-transition-running');
+        }
+      } catch (_) { /* A failed poll never changes the underlying operation. */ }
+    }));
+    window.setTimeout(pollTransitions, 10000);
+  }
+  window.setTimeout(pollTransitions, 10000);
+})();
+</script>
 {% endblock %}

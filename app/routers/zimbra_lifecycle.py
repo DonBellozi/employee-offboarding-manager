@@ -1,18 +1,22 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, Request, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.db import get_db
-from app.security import get_or_create_csrf, require_admin, validate_csrf
+from app.security import get_or_create_csrf, require_admin, require_operator, validate_csrf
 from app.services.zimbra_lifecycle import ZimbraLifecycleService
 from app.services.zimbra_employment_lifecycle import (
     ZimbraEmploymentLifecycleService,
 )
 from app.time_utils import register_datetime_filters
+from app.models_zimbra_lifecycle import ZimbraEmploymentAction
+from app.services.zimbra_primary_transition import (
+    ZimbraPrimaryTransitionService, STATUS_LABELS as TRANSITION_STATUSES, PHASE_LABELS,
+)
 
 
 router = APIRouter()
@@ -31,6 +35,83 @@ STATUS_LABELS = {
     "blocked": "Не разрешено",
     "failed": "Ошибка",
 }
+
+
+def _transition_context(request, settings, db, action_id, error=''):
+    user = require_operator(request)
+    action = db.get(ZimbraEmploymentAction, action_id)
+    if action is None or action.action != 'transition':
+        raise HTTPException(404, 'Переход не найден')
+    service = ZimbraPrimaryTransitionService(settings, db)
+    job = service.job(action_id)
+    spec = None
+    if job is None or job.status == 'cancelled':
+        try:
+            _, spec = service.inspect(action_id)
+        except Exception as exc:
+            error = error or str(exc)
+    return dict(user=user, csrf=get_or_create_csrf(request), action=action, job=job, spec=spec,
+        error=error, backup_allowed=service.employment._settings().allow_backup,
+        transition_statuses=TRANSITION_STATUSES, phase_labels=PHASE_LABELS)
+
+
+@router.get('/zimbra-transitions/{action_id}')
+def transition_page(action_id: int, request: Request, settings: Settings = Depends(get_settings), db: Session = Depends(get_db)):
+    return templates.TemplateResponse(request, 'zimbra_primary_transition.html',
+        _transition_context(request, settings, db, action_id))
+
+
+@router.post('/zimbra-transitions/{action_id}')
+def transition_enqueue(action_id: int, request: Request, csrf: str = Form(...),
+        expected_old: str = Form(...), expected_new: str = Form(...), confirmed: str = Form(''),
+        settings: Settings = Depends(get_settings), db: Session = Depends(get_db)):
+    user = require_operator(request)
+    validate_csrf(request, csrf)
+    try:
+        ZimbraPrimaryTransitionService(settings, db).enqueue(action_id, user.username,
+            expected_old=expected_old, expected_new=expected_new, confirmed=confirmed == 'true')
+        return RedirectResponse(f'/zimbra-transitions/{action_id}', status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return templates.TemplateResponse(request, 'zimbra_primary_transition.html',
+            _transition_context(request, settings, db, action_id, str(exc)), status_code=400)
+
+
+@router.post('/zimbra-transitions/{action_id}/retry')
+def transition_retry(action_id: int, request: Request, csrf: str = Form(...),
+        settings: Settings = Depends(get_settings), db: Session = Depends(get_db)):
+    user = require_operator(request)
+    validate_csrf(request, csrf)
+    try:
+        ZimbraPrimaryTransitionService(settings, db).retry(action_id, user.username)
+        return RedirectResponse(f'/zimbra-transitions/{action_id}', status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return templates.TemplateResponse(request, 'zimbra_primary_transition.html',
+            _transition_context(request, settings, db, action_id, str(exc)), status_code=400)
+
+
+@router.get('/zimbra-transitions/{action_id}/status')
+def transition_status(action_id: int, request: Request, settings: Settings = Depends(get_settings), db: Session = Depends(get_db)):
+    require_operator(request)
+    job = ZimbraPrimaryTransitionService(settings, db).job(action_id)
+    if job is None:
+        raise HTTPException(404, 'Задание не найдено')
+    return dict(status=job.status, label=TRANSITION_STATUSES.get(job.status, job.status), error=job.last_error)
+
+
+@router.post('/zimbra-transitions/{action_id}/cancel')
+def transition_cancel(action_id: int, request: Request, csrf: str = Form(...),
+        settings: Settings = Depends(get_settings), db: Session = Depends(get_db)):
+    user = require_operator(request)
+    validate_csrf(request, csrf)
+    try:
+        ZimbraPrimaryTransitionService(settings, db).cancel(action_id, user.username)
+        return RedirectResponse(f'/zimbra-transitions/{action_id}', status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return templates.TemplateResponse(request, 'zimbra_primary_transition.html',
+            _transition_context(request, settings, db, action_id, str(exc)), status_code=400)
 
 
 def _context(

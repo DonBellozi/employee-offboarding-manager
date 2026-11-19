@@ -27,7 +27,7 @@ from app.models_notifications import (
 )
 from app.models_onec_sources import HREmploymentState
 from app.models_techexpert import TechExpertNotification
-from app.models_zimbra_lifecycle import ZimbraEmploymentAction
+from app.models_zimbra_lifecycle import ZimbraEmploymentAction, ZimbraPrimaryTransition
 from app.models_dismissal_lifecycle import (
     ADReactivationAlert,
     DismissalDetailsSnapshot,
@@ -1296,6 +1296,18 @@ def _journal_items(
         *completed_dismissal_items,
         *organization_dismissal_items,
     ]
+    for job, fio in db.execute(select(ZimbraPrimaryTransition, ZimbraEmploymentAction.fio).join(
+        ZimbraEmploymentAction, ZimbraEmploymentAction.id == ZimbraPrimaryTransition.action_id).where(
+        ZimbraPrimaryTransition.status == 'completed').order_by(
+        ZimbraPrimaryTransition.completed_at.desc()).limit(50)).all():
+        items.append(dict(kind='zimbra-transition', record_id=job.id,
+            created_at=job.completed_at or job.created_at, action='Смена адреса Zimbra',
+            subject=fio or 'Работник', login='', corporate_email=job.new_address,
+            personal_email='', mail_domain='', operator=job.operator,
+            status_key='success', status_label='Успешно', error_message='',
+            details=[('Прежний адрес',job.old_address),('Новый основной адрес',job.new_address),
+                     ('Прежний адрес удалён','Да'),('Резервная копия',job.backup_path),
+                     ('Физический ящик',job.zimbra_id)], blocking_systems=[], equipment_snapshot=[]))
     items.sort(key=lambda item: item["created_at"], reverse=True)
     return items[:50]
 
@@ -1354,6 +1366,10 @@ def dashboard(
             )
         ).all()
     )
+    transition_jobs = {job.action_id: job for job in db.scalars(select(ZimbraPrimaryTransition).where(
+        ZimbraPrimaryTransition.action_id.in_([item.id for item in zimbra_attention_actions]))).all()}
+    for item in zimbra_attention_actions:
+        item.transition_job = transition_jobs.get(item.id)
     techexpert_attention_notifications = list(
         db.scalars(
             select(TechExpertNotification)

@@ -177,6 +177,9 @@
           <td>
             {{ item.details }}
             {% if item.last_error %}<div class="journal-error">{{ item.last_error }}</div>{% endif %}
+            {% if item.action == 'transition' %}
+            <a class="button secondary" href="/zimbra-transitions/{{ item.id }}" data-workspace-modal data-workspace-refresh="true" data-workspace-title="Переход между организациями">Разобрать</a>
+            {% endif %}
           </td>
         </tr>
         {% else %}

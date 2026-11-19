@@ -533,7 +533,10 @@ class ActiveDirectoryService:
             check_names = getattr(conn, 'check_names', True)
             try:
                 conn.check_names = False
-                conn.search('', '(objectClass=*)', search_scope=BASE, attributes=['defaultNamingContext'])
+                # ldap3 build_attribute_selection validates explicit names even
+                # when check_names=False. RootDSE selectors bypass that separate
+                # schema check without modifying global settings/shared schema.
+                conn.search('', '(objectClass=*)', search_scope=BASE, attributes=['*', '+'])
                 # Do not construct ldap3 Entry/ObjectDef for RootDSE either:
                 # that abstraction validates against the ordinary schema again.
                 root_entries = [item for item in (conn.response or []) if item.get('type') == 'searchResEntry']

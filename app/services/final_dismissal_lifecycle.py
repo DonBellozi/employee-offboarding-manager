@@ -734,7 +734,10 @@ class FinalDismissalLifecycleService:
         if ad is None or not ad["error"]:
             for target in self._targets(run.id):
                 if (target.system == 'ad' and target.status == 'intervention'
-                        and normalize(target.last_error) == 'invalid attribute type defaultnamingcontext'
+                        and normalize(target.last_error) in {
+                            'invalid attribute type defaultnamingcontext',
+                            'invalid attribute type in attribute list: defaultnamingcontext',
+                        }
                         and (normalize(target.target_identifier) or normalize(target.stable_id))):
                     # The old identity remains checkable even after its HR login
                     # disappeared. This repair may only prove absence, never block.

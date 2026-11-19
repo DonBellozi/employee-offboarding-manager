@@ -129,3 +129,26 @@ class ZimbraEmploymentAction(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
+
+
+class ZimbraPrimaryTransition(Base):
+    """Explicit operator approval and durable progress for a single mailbox."""
+    __tablename__ = 'zimbra_primary_transitions'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    action_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    worker_key: Mapped[str] = mapped_column(String(64), index=True)
+    zimbra_id: Mapped[str] = mapped_column(String(128), index=True)
+    active_mailbox_id: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
+    old_address: Mapped[str] = mapped_column(String(320))
+    new_address: Mapped[str] = mapped_column(String(320))
+    old_source: Mapped[str] = mapped_column(String(128))
+    new_source: Mapped[str] = mapped_column(String(128))
+    aliases_json: Mapped[str] = mapped_column(Text, default='[]')
+    operator: Mapped[str] = mapped_column(String(256))
+    status: Mapped[str] = mapped_column(String(32), default='queued', index=True)
+    phase: Mapped[str] = mapped_column(String(32), default='backup')
+    backup_path: Mapped[str] = mapped_column(String(2048), default='')
+    backup_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

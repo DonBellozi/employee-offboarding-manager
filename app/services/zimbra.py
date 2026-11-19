@@ -1159,6 +1159,15 @@ class ZimbraService:
             ["ma", normalized, "zimbraAccountStatus", "active"]
         )
 
+    def rename_account(self, zimbra_id: str, new_address: str) -> None:
+        self._run_zmprov_direct(['ra', zimbra_id, new_address])
+
+    def add_alias_by_id(self, zimbra_id: str, alias: str) -> None:
+        self._run_zmprov_direct(['aaa', zimbra_id, alias])
+
+    def remove_alias_by_id(self, zimbra_id: str, alias: str) -> None:
+        self._run_zmprov_direct(['raa', zimbra_id, alias])
+
     def remove_alias(self, primary_email: str, alias: str) -> None:
         """Удалить только организационный alias, не затрагивая сам ящик."""
         primary = str(primary_email or "").strip().lower()
