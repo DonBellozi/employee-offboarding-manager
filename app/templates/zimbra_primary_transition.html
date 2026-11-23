@@ -5,14 +5,14 @@
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 <section class="card">
   <h2>{{ action.fio or 'Работник' }}</h2>
-  <p>Сотрудник продолжает работать в другой организации. Нужно сменить основной адрес этого же ящика.</p>
+  <p>Сотрудник продолжает работать в другой организации. Можно выполнить переход системой или подтвердить уже сделанные вручную изменения.</p>
   <dl class="blocking-details">
     <dt>Прежний адрес</dt><dd>{{ spec.target_address if spec else job.old_address if job else action.target_address }}</dd>
-    <dt>Новый основной адрес</dt><dd>{{ spec.replacement_address if spec else job.new_address if job else action.replacement_address }}</dd>
+    <dt>Новый основной адрес</dt><dd>{{ manual.identity.primary_email if manual else spec.replacement_address if spec else job.new_address if job else action.replacement_address }}</dd>
   </dl>
-  <p>Сначала система создаст резервную копию. Затем сменит основной адрес и удалит прежний адрес. Письма и остальные адреса ящика сохранятся. Пароль почты не меняется.</p>
-  {% if not backup_allowed %}
-  <div class="alert warning">Резервное копирование выключено. Администратор должен разрешить его в настройках Zimbra.</div>
+  <p>При выполнении перехода системой сначала создаётся резервная копия, затем меняется основной адрес и удаляется прежний. Письма, остальные адреса и пароль почты сохраняются.</p>
+  {% if not backup_allowed and not manual %}
+  <div class="alert warning">Для автоматической смены адреса администратор должен разрешить резервное копирование в настройках Zimbra.</div>
   {% if user.role == 'admin' %}<a href="/settings/zimbra-lifecycle">Открыть настройки Zimbra</a>{% endif %}
   {% endif %}
   {% if job and job.status != 'cancelled' %}
@@ -23,21 +23,21 @@
   {% endif %}
   {% if job.status in ['queued','running','waiting_hr'] %}
     <p class="muted">Обработка выполняется в фоне. Окно можно закрыть; состояние обновится автоматически.</p>
-  {% elif job.status == 'failed' %}
+  {% elif job.status == 'failed' and not manual %}
     <form method="post" action="/zimbra-transitions/{{ action.id }}/retry">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <button type="submit">Повторить проверку и продолжить</button>
     </form>
   {% elif job.status == 'completed' %}
-    <div class="alert success">Основной адрес изменён, прежний адрес удалён. Ящик остаётся активным.</div>
+    <div class="alert success">{{ 'Ручное сопоставление сохранено. Переход подтверждён оператором.' if job.phase == 'manual_done' else 'Основной адрес изменён, прежний адрес удалён. Ящик остаётся активным.' }}</div>
   {% endif %}
-  {% if job.status in ['queued','waiting_hr','failed'] and job.phase in ['backup','rename'] %}
+  {% if not manual and job.status in ['queued','waiting_hr','failed'] and job.phase in ['backup','rename'] %}
   <form method="post" action="/zimbra-transitions/{{ action.id }}/cancel">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button type="submit" class="button secondary">Отменить задание, если адреса ещё не изменены</button>
   </form>
   {% endif %}
-  {% elif spec and backup_allowed %}
+  {% elif spec and backup_allowed and not manual %}
   <form method="post" action="/zimbra-transitions/{{ action.id }}" class="stack">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="expected_old" value="{{ spec.target_address }}">
@@ -46,9 +46,39 @@
     <button type="submit">Сменить основной адрес</button>
   </form>
   {% endif %}
+  {% if not job or job.status not in ['running', 'completed'] %}
+  <details data-manual-transition{% if manual or error or manual_email != action.replacement_address or manual_login %} open{% endif %}>
+    <summary>Уже изменено вручную</summary>
+    <p class="muted">Укажите действующий ящик. Если изменился логин AD, укажите его тоже; пустое поле сохраняет прежнее сопоставление AD.</p>
+    <form method="post" action="/zimbra-transitions/{{ action.id }}/manual" class="stack">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="operation" value="inspect">
+      <label>Основной адрес действующего ящика<input type="email" name="email" value="{{ manual_email }}" maxlength="320" required></label>
+      <label>Логин AD, если менялся<input name="ad_login" value="{{ manual_login }}" maxlength="128"></label>
+      <button class="button secondary" type="submit">Проверить сопоставление</button>
+    </form>
+    {% if manual %}
+    <dl class="blocking-details">
+      <dt>Почта</dt><dd>{{ manual.identity.primary_email }} — активна</dd>
+      <dt>Прежний адрес</dt><dd>Отсутствует</dd>
+      <dt>AD</dt><dd>{{ manual.ad_user.username ~ ' — активна' if manual.ad_user else 'Сопоставление сохраняется' }}</dd>
+    </dl>
+    <form method="post" action="/zimbra-transitions/{{ action.id }}/manual" class="stack">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="operation" value="confirm">
+      <input type="hidden" name="email" value="{{ manual.identity.primary_email }}">
+      <input type="hidden" name="ad_login" value="{{ manual_login }}">
+      <input type="hidden" name="expected_id" value="{{ manual.identity.zimbra_id }}">
+      <input type="hidden" name="expected_guid" value="{{ manual.ad_user.object_guid if manual.ad_user else '' }}">
+      <label class="check-row"><input type="checkbox" name="confirmed" value="true" required><span>Подтверждаю владельца учёток и выполненный вручную переход. Резервная копия старой почты сохранена.</span></label>
+      <button type="submit">Утвердить в системе</button>
+    </form>
+    {% endif %}
+  </details>
+  {% endif %}
   <p><a href="/zimbra-transitions/{{ action.id }}" data-workspace-navigate>Обновить сведения</a></p>
 </section>
-{% if job and job.status in ['queued','running','waiting_hr'] %}
-<script>window.setTimeout(() => window.location.reload(), 10000);</script>
+{% if not manual and job and job.status in ['queued','running','waiting_hr'] %}
+<script>window.setTimeout(() => { if (!document.querySelector('[data-manual-transition][open]')) window.location.reload(); }, 10000);</script>
 {% endif %}
 {% endblock %}

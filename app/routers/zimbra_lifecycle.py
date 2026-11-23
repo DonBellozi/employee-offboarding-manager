@@ -37,7 +37,7 @@ STATUS_LABELS = {
 }
 
 
-def _transition_context(request, settings, db, action_id, error=''):
+def _transition_context(request, settings, db, action_id, error='', *, manual=None, manual_email=None, manual_login=''):
     user = require_operator(request)
     action = db.get(ZimbraEmploymentAction, action_id)
     if action is None or action.action != 'transition':
@@ -51,7 +51,9 @@ def _transition_context(request, settings, db, action_id, error=''):
         spec = action
     return dict(user=user, csrf=get_or_create_csrf(request), action=action, job=job, spec=spec,
         error=error, backup_allowed=service.employment._settings().allow_backup,
-        transition_statuses=TRANSITION_STATUSES, phase_labels=PHASE_LABELS)
+        transition_statuses=TRANSITION_STATUSES, phase_labels=PHASE_LABELS,
+        manual=manual, manual_email=manual_email if manual_email is not None else (job.new_address if job else action.replacement_address),
+        manual_login=manual_login)
 
 
 @router.get('/zimbra-transitions/{action_id}')
@@ -88,6 +90,32 @@ def transition_retry(action_id: int, request: Request, csrf: str = Form(...),
         db.rollback()
         return templates.TemplateResponse(request, 'zimbra_primary_transition.html',
             _transition_context(request, settings, db, action_id, str(exc)), status_code=400)
+
+
+@router.post('/zimbra-transitions/{action_id}/manual')
+def transition_manual(action_id: int, request: Request, csrf: str = Form(...), email: str = Form(...),
+        ad_login: str = Form(''), operation: str = Form('inspect'), expected_id: str = Form(''),
+        expected_guid: str = Form(''), confirmed: str = Form(''),
+        settings: Settings = Depends(get_settings), db: Session = Depends(get_db)):
+    user = require_operator(request)
+    validate_csrf(request, csrf)
+    service = ZimbraPrimaryTransitionService(settings, db)
+    try:
+        if operation == 'inspect':
+            manual = service.inspect_manual(action_id, email, ad_login)
+            return templates.TemplateResponse(request, 'zimbra_primary_transition.html',
+                _transition_context(request, settings, db, action_id,
+                    manual=manual, manual_email=email, manual_login=ad_login))
+        if operation != 'confirm':
+            raise ValueError('Неизвестное действие')
+        service.confirm_manual(action_id, user.username, email=email, ad_login=ad_login,
+            expected_id=expected_id, expected_guid=expected_guid, confirmed=confirmed == 'true')
+        return RedirectResponse(f'/zimbra-transitions/{action_id}', status_code=303)
+    except Exception as exc:
+        db.rollback()
+        return templates.TemplateResponse(request, 'zimbra_primary_transition.html',
+            _transition_context(request, settings, db, action_id, str(exc), manual_email=email, manual_login=ad_login),
+            status_code=400)
 
 
 @router.get('/zimbra-transitions/{action_id}/status')
