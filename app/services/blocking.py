@@ -394,9 +394,12 @@ class BlockingService:
         record_id: int,
         *,
         remember_itinvent: bool = True,
+        allow_historical: bool = False,
     ) -> BlockingCard:
+        if allow_historical and remember_itinvent:
+            raise ValueError("Историческая карточка доступна только для чтения")
         record = self.db.get(HRSourceRecord, record_id)
-        if record is None or not record.is_present:
+        if record is None or (not record.is_present and not allow_historical):
             raise LookupError("Работник не найден в текущем кадровом реестре")
 
         mapping = self._mapping(record)

@@ -41,7 +41,8 @@ class ZimbraPrimaryTransitionService:
             raise ValueError('Переход между организациями не найден')
         if not self.employment._ready():
             raise TransitionDeferred('Ожидается завершение импорта и свежая кадровая выгрузка')
-        spec = next((spec for spec in self.employment._current_specs() if spec.plan_key == action.plan_key), None)
+        spec = next((spec for spec in self.employment._current_specs(worker_key=action.worker_key)
+                     if spec.plan_key == action.plan_key), None)
         if spec is None or spec.action != 'transition':
             raise ValueError('Переход больше не подтверждён. Обновите сведения после кадровой проверки')
         return action, spec

@@ -117,6 +117,128 @@ def request():
                     'session':{'csrf':'token'}})
 
 
+def test_review_get_renders_saved_addresses_without_any_directory_scan(case, monkeypatch):
+    monkeypatch.setattr(module.ZimbraPrimaryTransitionService, 'inspect',
+        Mock(side_effect=AssertionError('GET must not wait for live Zimbra/HR scan')))
+    page = routes.transition_page(case.action.id, request(), settings=case.settings, db=case.db)
+    assert page.status_code == 200
+    assert OLD in page.body.decode() and NEW in page.body.decode()
+
+
+def organization_event(case):
+    from app.models_notifications import HREmploymentDismissalEvent
+    event = HREmploymentDismissalEvent(worker_key='worker', source_id='old.test', fio='Иванов Иван',
+        sequence=1, status='open', first_dismissal_date=NOW.date(), current_dismissal_date=NOW.date())
+    case.db.add(event)
+    case.db.commit()
+    return event
+
+
+@pytest.mark.parametrize('alias_present', [False, True])
+def test_partial_dismissal_completes_today_without_closing_active_mailbox(case, alias_present):
+    from app.services.upcoming_dismissals import UpcomingDismissalService
+    from app.services.organization_dismissal_completion import organization_dismissal_complete
+    organization_event(case)
+    case.mail.primary = NEW
+    case.mail.addresses = {NEW, OLD} if alias_present else {NEW}
+    config = case.db.get(ZimbraLifecycleSettings, 1)
+    config.allow_alias_remove = True
+    # The production alias operation leaves the physical mailbox/primary intact.
+    case.mail.remove_alias = lambda primary, alias: case.mail.remove_alias_by_id('z-1', alias)
+    case.db.commit()
+    assert not organization_dismissal_complete(case.db, 'worker', NOW.date(), {'old.test'})
+    assert UpcomingDismissalService(case.settings, case.db)._all_candidates(include_expired=True)
+    result = case.service.employment.process()
+    assert result['completed'] == 1
+    assert case.mail.primary == NEW and case.mail.addresses == {NEW}
+    assert organization_dismissal_complete(case.db, 'worker', NOW.date(), {'old.test'})
+    assert UpcomingDismissalService(case.settings, case.db)._all_candidates(include_expired=True) == []
+    items = [item for item in _journal_items(case.db, today=NOW.date(), settings=case.settings)
+             if item['kind'] == 'dismissal']
+    assert len(items) == 1 and items[0]['status_key'] == 'success'
+    assert any(step['action'] == 'Почта организации' for step in items[0]['dismissal_steps'])
+    case.service.employment.process()
+    assert len([item for item in _journal_items(case.db, today=NOW.date(), settings=case.settings)
+                if item['kind'] == 'dismissal']) == 1
+
+
+def test_transition_is_not_archived_until_backup_rename_and_cleanup_finish(case):
+    from app.services.organization_dismissal_completion import organization_dismissal_complete
+    organization_event(case)
+    assert not organization_dismissal_complete(case.db, 'worker', NOW.date(), {'old.test'})
+    assert not [i for i in _journal_items(case.db, today=NOW.date(), settings=case.settings) if i['kind']=='dismissal']
+    enqueue(case)
+    case.service.process_due()
+    assert organization_dismissal_complete(case.db, 'worker', NOW.date(), {'old.test'})
+    assert len([i for i in _journal_items(case.db, today=NOW.date(), settings=case.settings) if i['kind']=='dismissal']) == 1
+
+
+def test_partial_dismissal_does_not_disappear_at_midnight_before_actions_finish(case,monkeypatch):
+    from app.models_dismissal_lifecycle import FinalDismissalAutomationState
+    from app.services.upcoming_dismissals import UpcomingDismissalService
+    organization_event(case)
+    tomorrow=NOW.date()+timedelta(days=1)
+    case.db.add(FinalDismissalAutomationState(id=1,activated_on=NOW.date()-timedelta(days=1)))
+    case.db.commit()
+    monkeypatch.setattr(UpcomingDismissalService,'today',property(lambda self:tomorrow))
+    assert UpcomingDismissalService(case.settings,case.db).list_upcoming()
+    assert not [i for i in _journal_items(case.db,today=tomorrow,settings=case.settings) if i['kind']=='dismissal']
+    enqueue(case)
+    case.service.process_due()
+    assert UpcomingDismissalService(case.settings,case.db).list_upcoming()==[]
+    assert len([i for i in _journal_items(case.db,today=tomorrow,settings=case.settings) if i['kind']=='dismissal'])==1
+
+
+@pytest.mark.parametrize('guard', ['hr', 'deferral', 'unavailable', 'unknown_address'])
+def test_no_address_proof_keeps_hr_deferral_and_complete_mail_lookup_guards(case, guard):
+    case.mail.primary = NEW
+    case.mail.addresses = {NEW}
+    if guard == 'hr':
+        case.ready['value'] = False
+    elif guard == 'deferral':
+        case.db.add(DismissalDeferral(worker_key='worker', dismissal_date=NOW.date(),
+            deferred_until=NOW.date()+timedelta(days=7), operator_username='operator'))
+        case.db.commit()
+    elif guard == 'unavailable':
+        case.mail.accounts_by_addresses = Mock(side_effect=ConnectionError('Zimbra unavailable'))
+    else:
+        case.mail.addresses.add(OTHER)
+    if guard == 'unavailable':
+        with pytest.raises(ConnectionError):
+            case.service.employment.process()
+    else:
+        assert case.service.employment.process()['completed'] == 0
+    assert not case.mail.calls
+
+
+@pytest.mark.parametrize('guard',['techexpert_pending','dsm_active','import','wrong_date','employment_active'])
+def test_partial_completion_waits_for_other_organization_work(case, guard):
+    from app.models_techexpert import TechExpertNotification, TechExpertSettings
+    from app.models_synology import SynologyAccountState
+    from app.models import OneCImportRun
+    from app.services.organization_dismissal_completion import organization_dismissal_complete
+    case.mail.primary=NEW
+    case.mail.addresses={NEW}
+    case.service.employment.process()
+    assert organization_dismissal_complete(case.db,'worker',NOW.date(),{'old.test'})
+    if guard=='techexpert_pending':
+        case.db.add(TechExpertSettings(id=1,enabled=True,source_domain='old.test',subject='test',body_html='test'))
+        case.db.add(TechExpertNotification(worker_key='worker',source_id='old.test',employment_event_id=1,
+            event_updated_at=NOW,dismissal_date=NOW.date(),scheduled_for=NOW,status='pending'))
+    elif guard=='dsm_active':
+        case.db.add(SynologyAccountState(worker_key='worker',email=OLD,login='ivanov',stable_id='dsm-1'))
+    elif guard=='import':
+        case.db.add(OneCImportRun(status='running'))
+    else:
+        state=case.db.scalar(select(HREmploymentState).where(HREmploymentState.source_id=='old.test'))
+        if guard=='wrong_date':
+            state.dismissal_date=NOW.date()+timedelta(days=1)
+        else:
+            state.status='active'
+    case.db.commit()
+    assert not organization_dismissal_complete(case.db,'worker',NOW.date(),{'old.test'})
+
+
 def test_approval_queues_once_and_does_not_mutate_zimbra_in_request(case):
     job = enqueue(case)
     assert job.status == 'queued' and job.phase == 'backup'

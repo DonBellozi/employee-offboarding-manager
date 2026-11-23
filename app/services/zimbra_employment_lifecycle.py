@@ -390,8 +390,11 @@ class ZimbraEmploymentLifecycleService:
                 result[address] = next(iter(matching_sources))
         return result
 
-    def _current_specs(self) -> list[ZimbraEmploymentSpec]:
-        states = list(self.db.scalars(select(HREmploymentState)).all())
+    def _current_specs(self, *, worker_key: str | None = None) -> list[ZimbraEmploymentSpec]:
+        query = select(HREmploymentState)
+        if worker_key is not None:
+            query = query.where(HREmploymentState.worker_key == worker_key)
+        states = list(self.db.scalars(query).all())
         if not states:
             return []
 
@@ -552,6 +555,8 @@ class ZimbraEmploymentLifecycleService:
 
             worker_states = states_by_worker.get(worker_key, {})
             worker_records = records_by_worker.get(worker_key, [])
+            present_sources = set()
+            unknown_addresses = False
             for identity in identities.values():
                 identity_addresses = {
                     normalize(identity.primary_email),
@@ -573,6 +578,13 @@ class ZimbraEmploymentLifecycleService:
                         )
                     )
                 ]
+                sources = self._address_sources_for_mailbox(
+                    identity=identity, mappings=relevant_mappings, states=worker_states, records=worker_records)
+                for address in identity_addresses:
+                    source = sources.get(address, address_domain(address))
+                    present_sources.add(source)
+                    if source not in worker_states:
+                        unknown_addresses = True
                 result.extend(
                     self._specs_for_mailbox(
                         worker_key=worker_key,
@@ -588,6 +600,21 @@ class ZimbraEmploymentLifecycleService:
                         ),
                     )
                 )
+            # A successful lookup can confirm that the ended organization has
+            # no address on this person's known mailbox. Persist that outcome
+            # so a partial dismissal can leave the upcoming list immediately.
+            if (any(state.status in ACTIVE_STATUSES for state in worker_states.values())
+                    and not unknown_addresses
+                    and (identities or candidate_addresses_by_worker.get(worker_key))):
+                for source, state in worker_states.items():
+                    if self._due(state, deferrals) and source not in present_sources:
+                        day = state.dismissal_date or self.local_now.date()
+                        result.append(ZimbraEmploymentSpec(
+                            plan_key=self._key(worker_key, '', 'no_address', source, day),
+                            worker_key=worker_key, fio=fio_by_worker.get(worker_key, ''), zimbra_id='',
+                            action='no_address', source_id=source, target_address='', replacement_address='',
+                            dismissal_date=day, effective_action_date=self._effective_date(state, deferrals),
+                            details='Проверено: у работника нет адреса завершённой организации; действующий ящик сохраняется.'))
         return result
 
     def _ensure_action(self, spec: ZimbraEmploymentSpec) -> ZimbraEmploymentAction:
@@ -660,12 +687,18 @@ class ZimbraEmploymentLifecycleService:
             row.status = 'pending'
             row.last_error = 'Ожидается завершение импорта и свежая кадровая выгрузка'
             return False
-        current = {spec.plan_key: spec for spec in self._current_specs()}
+        current = {spec.plan_key: spec for spec in self._current_specs(worker_key=row.worker_key)}
         if row.plan_key not in current:
             row.status = "cancelled"
             row.cancelled_at = utcnow()
             row.last_error = "Повторная HR-проверка отменила действие"
             return False
+
+        if row.action == 'no_address':
+            row.status = 'completed'
+            row.completed_at = utcnow()
+            row.last_error = ''
+            return True
 
         if row.action in {"transition", "manual_review"}:
             row.status = "intervention"

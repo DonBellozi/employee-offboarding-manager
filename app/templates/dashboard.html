@@ -217,7 +217,7 @@
               {{ row.attention_details or row.last_error or 'Нужна проверка оператора' }}
             </div>
           </td>
-          <td>–</td>
+          <td><a class="button secondary" href="/techexpert/dismissals/{{ row.id }}/identity" data-workspace-modal data-workspace-refresh="true" data-workspace-title="Сопоставление Техэксперта">Разобрать</a></td>
         </tr>
         {% endfor %}
       </tbody>

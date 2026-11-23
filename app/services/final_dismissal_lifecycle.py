@@ -740,6 +740,7 @@ class FinalDismissalLifecycleService:
                         and normalize(target.last_error) in {
                             'invalid attribute type defaultnamingcontext',
                             'invalid attribute type in attribute list: defaultnamingcontext',
+                            'ad вернула перенаправление; отсутствие учётки не подтверждено',
                         }
                         and (normalize(target.target_identifier) or normalize(target.stable_id))):
                     # The old identity remains checkable even after its HR login

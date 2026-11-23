@@ -27,6 +27,15 @@ from ldap3.utils.dn import escape_rdn, parse_dn
 from app.config import Settings
 
 
+DOMAIN_SCOPE_CONTROL = ('1.2.840.113556.1.4.1339', True, None)
+
+
+class ADIdentityCandidatesError(ValueError):
+    def __init__(self, candidates):
+        super().__init__("Найдены кандидаты AD; требуется явное сопоставление работника")
+        self.candidates = candidates
+
+
 @dataclass(frozen=True)
 class ADCreateResult:
     dn: str
@@ -560,8 +569,13 @@ class ActiveDirectoryService:
             actual_domain = domain_parts(domain_dn)
             if not actual_domain or (expected_domain and expected_domain != actual_domain):
                 raise RuntimeError("Подключён другой домен AD; отсутствие объекта не подтверждено")
-            conn.search(domain_dn, f"(|{''.join(clauses)})", search_scope=SUBTREE,
-                        attributes=['objectGUID','sAMAccountName'])
+            auto_referrals = getattr(conn, 'auto_referrals', True)
+            try:
+                conn.auto_referrals = False
+                conn.search(domain_dn, f"(|{''.join(clauses)})", search_scope=SUBTREE,
+                            attributes=['objectGUID','sAMAccountName'], controls=[DOMAIN_SCOPE_CONTROL])
+            finally:
+                conn.auto_referrals = auto_referrals
             if conn.result.get('result') != 0:
                 if conn.result.get('result') in {3, 51, 52, 81, 85, 91}:
                     raise RuntimeError("AD временно недоступна; отсутствие учётки не подтверждено")
@@ -643,13 +657,16 @@ class ActiveDirectoryService:
             conn.search(self.settings.ad_base_dn,
                         "(&(objectCategory=person)(objectClass=user)" + clause + ")",
                         attributes=["sAMAccountName", "displayName", "mail", "userAccountControl",
-                                    "distinguishedName", "objectGUID", "accountExpires"], size_limit=2)
+                                    "distinguishedName", "objectGUID", "accountExpires"], size_limit=2 if guid or login else 0)
             self._require_group_read_success(conn)
             entries = list(conn.entries)
             if not entries:
                 return None
             if len(entries) != 1 or not (guid or login):
-                raise ValueError("Найдены кандидаты AD; требуется явное сопоставление работника")
+                candidates = [self._entry_to_directory_user(entry) for entry in entries]
+                if any(user is None or not user.object_guid for user in candidates):
+                    raise ValueError('AD вернул неполные сведения о кандидатах; отсутствие не подтверждено')
+                raise ADIdentityCandidatesError(candidates)
             user = self._entry_to_directory_user(entries[0])
             if user is None or not user.distinguished_name:
                 raise ValueError("AD вернул неполные сведения об учётной записи")

@@ -26,12 +26,14 @@ from app.models_notifications import (
     HREmploymentDismissalEvent,
 )
 from app.models_onec_sources import HREmploymentState
+from app.services.organization_dismissal_completion import organization_dismissal_complete
 from app.models_techexpert import TechExpertNotification
 from app.models_zimbra_lifecycle import ZimbraEmploymentAction, ZimbraPrimaryTransition
 from app.models_dismissal_lifecycle import (
     ADReactivationAlert,
     DismissalDetailsSnapshot,
     FinalDismissalBlockRun,
+    FinalDismissalAutomationState,
     FinalDismissalBlockTarget,
 )
 from app.routers.employees import (
@@ -693,6 +695,7 @@ def _organization_dismissal_journal_item(
     techexpert_notifications: list[TechExpertNotification],
     snapshot: DismissalDetailsSnapshot | None,
     mapped_ad_login: str = "",
+    mail_actions: list[ZimbraEmploymentAction] | None = None,
 ) -> dict[str, object]:
     """Итог одной организации, когда общая AD-учетка остается активной."""
     event_date = max(
@@ -717,9 +720,9 @@ def _organization_dismissal_journal_item(
     components.sort(key=lambda item: item.get("completed_at") or item["created_at"])
     completed_at = max(
         [
-            *[event.updated_at for event in events],
+            *[event.updated_at.replace(tzinfo=None) for event in events],
             *[
-                item.get("completed_at") or item["created_at"]
+                (item.get("completed_at") or item["created_at"]).replace(tzinfo=None)
                 for item in components
             ],
         ]
@@ -784,7 +787,7 @@ def _organization_dismissal_journal_item(
             "status_key": "success",
             "status_label": "Подтверждено",
             "operator": "Система",
-            "timestamp": event.updated_at,
+            "timestamp": event.updated_at.replace(tzinfo=None),
             "details": [
                 ("Организация", event.source_name or event.source_id),
                 (
@@ -807,13 +810,19 @@ def _organization_dismissal_journal_item(
             "status_key": item["status_key"],
             "status_label": item["status_label"],
             "operator": item["operator"],
-            "timestamp": item.get("completed_at") or item["created_at"],
+            "timestamp": (item.get("completed_at") or item["created_at"]).replace(tzinfo=None),
             "details": item.get("details") or [],
             "blocking_systems": item.get("blocking_systems") or [],
             "error_message": item.get("error_message") or "",
         }
         for item in components
     )
+    for action in mail_actions or []:
+        steps.append(dict(record_id=action.id, action="Почта организации", status_key="success",
+            status_label="Завершено", operator="Система", timestamp=(action.completed_at or action.updated_at).replace(tzinfo=None),
+            details=[("Адрес", action.target_address or "Отсутствует"), ("Результат", action.details or action.action)],
+            blocking_systems=[], error_message=""))
+        completed_at = max(completed_at, (action.completed_at or action.updated_at).replace(tzinfo=None))
     steps.sort(key=lambda item: item["timestamp"])
     errors = [
         f"{item['action']}: {item['error_message']}"
@@ -896,6 +905,7 @@ def _journal_items(
     *,
     today: date | None = None,
     timezone_name: str = "UTC",
+    settings: Settings | None = None,
 ) -> list[dict[str, object]]:
     today = today or date.today()
     provisioning_operations = db.scalars(
@@ -1175,7 +1185,7 @@ def _journal_items(
     active_worker_keys = set(
         db.scalars(
             select(HREmploymentState.worker_key).where(
-                HREmploymentState.status == "active"
+                HREmploymentState.status.in_(["active", "scheduled"])
             )
         ).all()
     )
@@ -1189,7 +1199,7 @@ def _journal_items(
             event.worker_key not in active_worker_keys
             or event.status not in {"open", "absent"}
             or event_date is None
-            or event_date >= today
+            or event_date > today
         ):
             continue
         key = (event.worker_key, event_date)
@@ -1217,6 +1227,12 @@ def _journal_items(
     for (worker_key, event_date), events in list(
         organization_event_groups.items()
     )[:50]:
+        activation = db.get(FinalDismissalAutomationState, 1)
+        legacy_history = event_date < today and (activation is None or event_date < activation.activated_on)
+        if not legacy_history and not organization_dismissal_complete(db, worker_key, event_date,
+                {event.source_id for event in events},
+                mail_check_enabled=settings.zimbra_check_enabled if settings is not None else True):
+            continue
         event_ids = {event.id for event in events}
         worker_notices = list(
             db.scalars(
@@ -1252,6 +1268,11 @@ def _journal_items(
         organization_dismissal_items.append(
             _organization_dismissal_journal_item(
                 events,
+                mail_actions=list(db.scalars(select(ZimbraEmploymentAction).where(
+                    ZimbraEmploymentAction.worker_key == worker_key,
+                    ZimbraEmploymentAction.dismissal_date == event_date,
+                    ZimbraEmploymentAction.source_id.in_({event.source_id for event in events}),
+                    ZimbraEmploymentAction.status == 'completed'))),
                 notice=notice,
                 techexpert_notifications=list(
                     db.scalars(
@@ -1405,6 +1426,7 @@ def dashboard(
                 db,
                 today=dashboard_today,
                 timezone_name=settings.app_timezone,
+                settings=settings,
             ),
             ad_reactivation_alerts=ad_reactivation_alerts,
             zimbra_attention_actions=zimbra_attention_actions,

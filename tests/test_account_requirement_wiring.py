@@ -39,6 +39,8 @@ def test_main_registers_decision_form_and_history_routes():
     assert "get" in paths.get("/account-requirements/{case_id}", {})
     assert "get" in paths.get("/admin/account-requirements", {})
     assert "get" in paths.get("/admin/account-requirements-export", {})
+    assert {'get', 'post'}.issubset(paths.get('/techexpert/dismissals/{notification_id}/identity', {}))
+    assert {'get', 'post'}.issubset(paths.get('/zimbra-transitions/{action_id}', {}))
 
 
 @pytest.fixture
@@ -183,6 +185,9 @@ def test_requirement_worker_starts_and_stops_with_real_lifespan(monkeypatch, con
     complete_immediately(context.__aenter__())
     requirement.assert_called_once_with(main.settings, main.SessionLocal)
     requirement.return_value.start.assert_called_once_with()
+    transition = constructors['ZimbraPrimaryTransitionWorker']
+    transition.assert_called_once_with(main.settings, main.SessionLocal)
+    transition.return_value.start.assert_called_once_with()
     if context_error:
         assert not complete_immediately(context.__aexit__(RuntimeError, RuntimeError("test"), None))
     else:

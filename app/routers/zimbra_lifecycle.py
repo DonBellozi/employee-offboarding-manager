@@ -46,10 +46,9 @@ def _transition_context(request, settings, db, action_id, error=''):
     job = service.job(action_id)
     spec = None
     if job is None or job.status == 'cancelled':
-        try:
-            _, spec = service.inspect(action_id)
-        except Exception as exc:
-            error = error or str(exc)
+        # Paint the review immediately. Live HR/Zimbra validation remains
+        # mandatory in enqueue and before every background phase.
+        spec = action
     return dict(user=user, csrf=get_or_create_csrf(request), action=action, job=job, spec=spec,
         error=error, backup_allowed=service.employment._settings().allow_backup,
         transition_statuses=TRANSITION_STATUSES, phase_labels=PHASE_LABELS)

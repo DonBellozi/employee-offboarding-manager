@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Сопоставление Техэксперта{% endblock %}
+{% block content %}
+<h1 data-workspace-page-title>Сопоставление Техэксперта</h1>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+{% if message %}<div class="alert success">{{ message }}</div>{% endif %}
+{% if notification %}
+<section class="card">
+  <h2>{{ notification.fio }}</h2>
+  <p>{{ notification.source_name or notification.source_id }} · Увольнение {{ notification.dismissal_date.strftime('%d.%m.%Y') }}</p>
+  <p>Выберите учётку работника. Блокировка AD выполняется только при завершении работы во всех организациях. Доступ Техэксперта закрывается для организации подписки.</p>
+  {% if check_error %}<div class="alert warning">{{ check_error }}</div>{% endif %}
+  {% for candidate in candidates %}
+  <form method="post" action="/techexpert/dismissals/{{ notification_id }}/identity" class="card">
+    <strong>{{ candidate.display_name }}</strong> · {{ candidate.username }}
+    <span class="muted">{{ 'AD активна' if candidate.is_enabled else 'AD заблокирована' }}</span>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="login" value="{{ candidate.username }}">
+    <input type="hidden" name="expected_guid" value="{{ candidate.object_guid }}">
+    <label class="check-row"><input type="checkbox" name="confirmed" value="true" required><span>Это учётка данного работника</span></label>
+    <button type="submit">Сопоставить и продолжить</button>
+  </form>
+  {% endfor %}
+  <form method="get" action="/techexpert/dismissals/{{ notification_id }}/identity">
+    {% if request.query_params.get('modal') %}<input type="hidden" name="modal" value="1">{% endif %}
+    <label>Другой логин AD <input name="login" value="{{ login }}" maxlength="128"></label>
+    <button type="submit" class="button secondary">Проверить</button>
+  </form>
+  {% if selected %}
+  <form method="post" action="/techexpert/dismissals/{{ notification_id }}/identity">
+    <p>{{ selected.display_name }} · <strong>{{ selected.username }}</strong></p>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="login" value="{{ selected.username }}">
+    <input type="hidden" name="expected_guid" value="{{ selected.object_guid }}">
+    <label class="check-row"><input type="checkbox" name="confirmed" value="true" required><span>Подтверждаю владельца</span></label>
+    <button type="submit">Сопоставить и продолжить</button>
+  </form>
+  {% endif %}
+  {% if fingerprint %}
+  <form method="post" action="/techexpert/dismissals/{{ notification_id }}/identity">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="fingerprint" value="{{ fingerprint }}">
+    <label class="check-row"><input type="checkbox" name="confirmed" value="true" required><span>Все найденные учётки относятся к другим людям. У работника нет учётки AD.</span></label>
+    <button type="submit" class="button secondary">Подтвердить отсутствие AD</button>
+  </form>
+  {% endif %}
+  <p class="muted">Почта проверяется отдельно. Подтверждение отсутствия AD не отменяет закрытие найденного ящика.</p>
+</section>
+{% endif %}
+{% endblock %}

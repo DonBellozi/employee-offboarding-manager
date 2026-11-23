@@ -21,6 +21,7 @@ from app.models_onec_sources import HREmploymentState, OneCAdditionalSource
 from app.models_preliminary_dismissals import PreliminaryDismissalItem
 from app.services.hr_employment import sync_workbook_employment
 from app.services.onec_xlsx import parse_onec_xlsx
+from app.services.organization_dismissal_completion import organization_dismissal_complete
 
 
 DEFERRAL_ACTION = "final_dismissal_deferred"
@@ -144,7 +145,7 @@ class UpcomingDismissalService:
             if row.source_id
         }
 
-    def _all_candidates(self, *, include_expired: bool = False) -> list[dict]:
+    def _all_candidates(self, *, include_expired: bool = False, include_completed: bool = False) -> list[dict]:
         employment_rows = list(
             self.db.scalars(
                 select(HREmploymentState).order_by(
@@ -237,11 +238,18 @@ class UpcomingDismissalService:
                 else None
             )
             if (
-                block_run is not None
+                not include_completed
+                and block_run is not None
                 and block_run.status == "success"
                 and block_run.completed_at is not None
             ):
                 continue
+            if not final_dismissal and not include_completed:
+                sources = {state.source_id for state in states if state.dismissal_date == final_date
+                           and state.status not in {'active', 'scheduled'}}
+                if organization_dismissal_complete(self.db, worker_key, final_date, sources,
+                        mail_check_enabled=getattr(self.settings, 'zimbra_check_enabled', False)):
+                    continue
             if (
                 not include_expired
                 and final_date < today
@@ -251,7 +259,8 @@ class UpcomingDismissalService:
                 )
             ):
                 if not final_dismissal:
-                    continue
+                    if automation_state is None or final_date < automation_state.activated_on:
+                        continue
                 else:
                     historical_before_automation = bool(
                         block_run is None

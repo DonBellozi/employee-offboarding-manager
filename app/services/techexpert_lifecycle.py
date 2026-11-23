@@ -24,7 +24,7 @@ from app.models_techexpert import (
     TechExpertNotificationBatch,
     TechExpertNotificationBatchItem,
 )
-from app.services.ad import ActiveDirectoryService
+from app.services.ad import ActiveDirectoryService, ADIdentityCandidatesError
 from app.services.mailer import (
     CredentialMailer,
     get_domain_mail_profile,
@@ -555,7 +555,14 @@ class TechExpertLifecycleService:
             ad = ActiveDirectoryService(self.settings)
             if row.group_removal_status not in {"removed", "already_absent"}:
                 ad_stage = True
-                user = ad.lookup_group_user(identity.ad_login, object_guid=identity.ad_object_guid, full_name=row.fio)
+                try:
+                    user = ad.lookup_group_user(identity.ad_login, object_guid=identity.ad_object_guid, full_name=row.fio)
+                except ADIdentityCandidatesError as exc:
+                    from app.services.techexpert_identity_review import candidates_excluded
+                    if candidates_excluded(self.db, row, identity, exc.candidates):
+                        self._skip_absent_access(row, 'Оператор подтвердил: найденные кандидаты AD относятся к другим людям')
+                        return False
+                    raise TechExpertDataError(str(exc)) from exc
                 if user is None:
                     self._skip_absent_access(row, "AD подтвердил отсутствие учётной записи; доступ отсутствует")
                     return False

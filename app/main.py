@@ -50,6 +50,7 @@ from app.services.zimbra_mail_recall import ZimbraMailRecallService
 from app.services.zimbra_employment_lifecycle import (
     ZimbraEmploymentLifecycleWorker,
 )
+from app.services.zimbra_primary_transition import ZimbraPrimaryTransitionWorker
 
 settings = get_settings()
 
@@ -100,6 +101,7 @@ async def lifespan(_: FastAPI):
     )
     techexpert_worker = TechExpertLifecycleWorker(settings, SessionLocal)
     account_requirement_worker = AccountRequirementWorker(settings, SessionLocal)
+    zimbra_transition_worker = ZimbraPrimaryTransitionWorker(settings, SessionLocal)
     onec_scheduler.start()
     blocking_worker.start()
     dismissal_notification_worker.start()
@@ -112,9 +114,11 @@ async def lifespan(_: FastAPI):
     zimbra_employment_worker.start()
     techexpert_worker.start()
     account_requirement_worker.start()
+    zimbra_transition_worker.start()
     try:
         yield
     finally:
+        zimbra_transition_worker.stop()
         account_requirement_worker.stop()
         techexpert_worker.stop()
         zimbra_employment_worker.stop()

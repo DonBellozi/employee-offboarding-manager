@@ -50,6 +50,45 @@ router = APIRouter()
 templates = register_datetime_filters(Jinja2Templates(directory="app/templates"))
 
 
+def _identity_context(request, settings, db, notification_id, login='', error=''):
+    from app.services.techexpert_identity_review import TechExpertIdentityReviewService
+    user = require_operator(request)
+    context = dict(notification=None, candidates=[], selected=None, fingerprint='', check_error='', login=login)
+    try:
+        context.update(TechExpertIdentityReviewService(settings, db).inspect(notification_id, login))
+    except Exception as exc:
+        error = error or str(exc)
+    return dict(user=user, csrf=get_or_create_csrf(request), notification_id=notification_id,
+                error=error, **context)
+
+
+@router.get('/techexpert/dismissals/{notification_id}/identity')
+def dismissal_identity_page(notification_id: int, request: Request, login: str = '',
+        settings: Settings = Depends(get_settings), db: Session = Depends(get_db)):
+    return templates.TemplateResponse(request, 'techexpert_identity_review.html',
+        _identity_context(request, settings, db, notification_id, login))
+
+
+@router.post('/techexpert/dismissals/{notification_id}/identity')
+def dismissal_identity_save(notification_id: int, request: Request, csrf: str = Form(...),
+        login: str = Form(''), expected_guid: str = Form(''), fingerprint: str = Form(''), confirmed: str = Form(''),
+        settings: Settings = Depends(get_settings), db: Session = Depends(get_db)):
+    from app.services.techexpert_identity_review import TechExpertIdentityReviewService
+    user = require_operator(request)
+    validate_csrf(request, csrf)
+    try:
+        TechExpertIdentityReviewService(settings, db).save(notification_id, user.username, login=login,
+            expected_guid=expected_guid, fingerprint=fingerprint, confirmed=confirmed == 'true')
+        return templates.TemplateResponse(request, 'techexpert_identity_review.html', dict(
+            user=user, csrf=get_or_create_csrf(request), notification_id=notification_id,
+            notification=None, candidates=[], selected=None, fingerprint='', login='', error='', check_error='',
+            message='Решение сохранено. Кадровый цикл повторно проверит данные и продолжит обработку.'))
+    except Exception as exc:
+        db.rollback()
+        return templates.TemplateResponse(request, 'techexpert_identity_review.html',
+            _identity_context(request, settings, db, notification_id, error=str(exc)), status_code=400)
+
+
 def _redirect(*, message: str = "", error: str = "") -> RedirectResponse:
     parts = []
     if message:

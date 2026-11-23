@@ -193,12 +193,13 @@ class DismissalDetailsService:
 
     def _blocking_card(self, worker_key: str) -> tuple[BlockingCard | None, str]:
         record = self._preferred_record(worker_key)
-        if record is None or not record.is_present:
-            return None, "Работник отсутствует в текущем кадровом реестре"
+        if record is None:
+            return None, "Не найдена сохранённая кадровая запись; требуется проверить сопоставление"
         try:
             return BlockingService(self.settings, self.db).card(
                 record.id,
                 remember_itinvent=False,
+                allow_historical=True,
             ), ""
         except Exception as exc:
             self.db.rollback()

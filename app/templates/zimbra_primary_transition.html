@@ -42,7 +42,7 @@
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="expected_old" value="{{ spec.target_address }}">
     <input type="hidden" name="expected_new" value="{{ spec.replacement_address }}">
-    <label style="display:flex; gap:10px; align-items:flex-start"><input style="width:auto; flex:0 0 auto; margin-top:3px" type="checkbox" name="confirmed" value="true" required><span>Подтверждаю смену основного адреса и удаление прежнего.</span></label>
+    <label class="check-row"><input type="checkbox" name="confirmed" value="true" required><span>Подтверждаю смену основного адреса и удаление прежнего.</span></label>
     <button type="submit">Сменить основной адрес</button>
   </form>
   {% endif %}
