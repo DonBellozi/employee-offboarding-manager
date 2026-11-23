@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import threading
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -16,7 +15,6 @@ from app.models import OneCImportRun
 from app.models_dismissal_lifecycle import DismissalDetailsSnapshot
 from app.services.dismissal_details import DismissalDetailsService
 from app.services.upcoming_dismissals import UpcomingDismissalService
-from app.services.onec_import_recovery import PROCESS_STARTED_AT, running_import
 
 
 logger = logging.getLogger(__name__)
@@ -30,6 +28,11 @@ DELAY_SECONDS = 10 * 60
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# Set before lifespan starts import workers. Rows from earlier processes are
+# history, not evidence that an import is still executing in this process.
+PROCESS_STARTED_AT = utcnow()
 
 
 def _aware_utc(value: datetime | None) -> datetime | None:
@@ -102,9 +105,13 @@ class DismissalDetailsCacheService:
         )
 
     def active_import(self) -> OneCImportRun | None:
-        # Same interlock as mail/lifecycle consumers. Startup recovery repairs
-        # the history once, rather than having snapshots ignore it alone.
-        return running_import(self.db)
+        return self.db.scalar(
+            select(OneCImportRun).where(
+                OneCImportRun.status == "running",
+                OneCImportRun.completed_at.is_(None),
+                OneCImportRun.started_at >= PROCESS_STARTED_AT,
+            ).order_by(OneCImportRun.started_at).limit(1)
+        )
 
     def enqueue(self, candidate: dict) -> DismissalDetailsSnapshot:
         snapshot = self._snapshot(candidate)
@@ -171,7 +178,7 @@ class DismissalDetailsCacheService:
         return value.astimezone(zone).strftime("%d.%m.%Y %H:%M")
 
     @staticmethod
-    def _valid_rows(payload_json: str) -> list[dict[str, object]]:
+    def _valid_rows(payload_json: str) -> list[dict[str, str]]:
         try:
             payload = json.loads(payload_json or "{}")
         except (TypeError, json.JSONDecodeError):
@@ -193,71 +200,7 @@ class DismissalDetailsCacheService:
                     "note": str(row.get("note") or ""),
                 }
             )
-            # Optional, backward-compatible metadata for the list indicator.
-            count = row.get("equipment_count")
-            if (row.get("label") == "IT Invent" and row.get("state") in {"success", "neutral"}
-                    and type(count) is int and count >= 0):
-                result[-1]["equipment_count"] = count
-                result[-1]["equipment_stale"] = row.get("equipment_stale") is True
         return result
-
-    def attach_equipment_summaries(self, candidates: list[dict]) -> None:
-        """Annotate the UI in one local SELECT, without enqueueing/live checks."""
-        if not candidates:
-            return
-        snapshots = {
-            (snapshot.worker_key, snapshot.dismissal_date): snapshot
-            for snapshot in self.db.scalars(
-                select(DismissalDetailsSnapshot).where(
-                    DismissalDetailsSnapshot.worker_key.in_({item["worker_key"] for item in candidates}),
-                    DismissalDetailsSnapshot.dismissal_date.in_({item["dismissal_date"] for item in candidates}),
-                )
-            )
-        }
-        now = utcnow()
-        for candidate in candidates:
-            snapshot = snapshots.get((candidate["worker_key"], candidate["dismissal_date"]))
-            rows = self._valid_rows(snapshot.payload_json) if snapshot else []
-            row = next((item for item in rows if item["label"] == "IT Invent"), {})
-            count = row.get("equipment_count")
-            # Read existing version-1 snapshots immediately, before the next refresh.
-            if count is None and row.get("state") in {"success", "neutral"}:
-                value = row.get("value", "")
-                match = re.fullmatch(r"Есть\s*[—–-]\s*([0-9]{1,9})\s*шт\.", value)
-                if match:
-                    count = int(match[1])
-                elif value == "Отсутствует":
-                    count = 0
-            checked_at = _aware_utc(snapshot.checked_at) if snapshot else None
-            stale = count is not None and (
-                not snapshot or snapshot.status != "ready"
-                or snapshot.candidate_fingerprint != self.candidate_fingerprint(candidate)
-                or not checked_at or now - checked_at >= timedelta(seconds=DELAY_SECONDS)
-                or row.get("equipment_stale") is True
-                or "последний успешный результат" in row.get("note", "").lower()
-            )
-            state = "unknown"
-            label = "Оборудование: не проверено"
-            if count is not None:
-                state = "present" if count else "empty"
-                label = f"Оборудование · {count}" if count else "Оборудования нет"
-                if stale:
-                    label += " · устарело"
-            elif row.get("state") == "error" or (snapshot and snapshot.status == "error"):
-                state, label = "error", "Оборудование: ошибка проверки"
-            elif row:
-                label = "Оборудование: нет данных"
-            note = str(row.get("note") or row.get("value")
-                       or (snapshot.last_error if snapshot else "")
-                       or "Фоновая проверка ещё не завершена")
-            if checked_at:
-                note += f". Снимок: {self._format_datetime(checked_at)}"
-            if stale:
-                note += ". Последние сохранённые сведения; ожидается фоновое обновление"
-            candidate["equipment_summary"] = {
-                "state": state, "label": label, "count": count, "stale": bool(stale),
-                "title": f"IT Invent: {note}. Подробнее — в «Подробностях»",
-            }
 
     def refresh(self, candidate: dict) -> DismissalDetailsSnapshot:
         attempt_at = utcnow()
@@ -371,6 +314,7 @@ class DismissalDetailsSnapshotWorker:
         self.session_factory = session_factory
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._reported_old_imports: set[int] = set()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -392,6 +336,17 @@ class DismissalDetailsSnapshotWorker:
         with self.session_factory() as db:
             try:
                 cache = DismissalDetailsCacheService(self.settings, db)
+                old_imports = set(db.scalars(select(OneCImportRun.id).where(
+                    OneCImportRun.status == "running",
+                    OneCImportRun.started_at < PROCESS_STARTED_AT,
+                )))
+                unreported = old_imports - self._reported_old_imports
+                if unreported:
+                    logger.warning(
+                        "Фоновые снимки: записи импорта до запуска приложения не блокируют проверку: %s",
+                        sorted(unreported),
+                    )
+                    self._reported_old_imports.update(unreported)
                 if cache.active_import() is not None:
                     return
                 candidates = UpcomingDismissalService(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import desc, select
@@ -18,10 +18,6 @@ from app.models_techexpert import TechExpertSettings
 from app.services.ad import ActiveDirectoryService
 from app.services.blocking import BlockingCard, BlockingService
 from app.services.dismissal_notifications import DismissalNotificationService
-from app.services.onec_import_recovery import running_import
-from app.services.onec_freshness import OneCSourceFreshnessService
-from app.models_onec_sources import OneCAdditionalSource
-from app.services.blocking_window import BLOCK_TIME_LABEL, is_block_window_open
 
 
 class DismissalDetailsService:
@@ -197,19 +193,18 @@ class DismissalDetailsService:
 
     def _blocking_card(self, worker_key: str) -> tuple[BlockingCard | None, str]:
         record = self._preferred_record(worker_key)
-        if record is None:
-            return None, "Не найдена сохраненная кадровая запись; требуется проверить сопоставление работника"
+        if record is None or not record.is_present:
+            return None, "Работник отсутствует в текущем кадровом реестре"
         try:
             return BlockingService(self.settings, self.db).card(
                 record.id,
                 remember_itinvent=False,
-                allow_historical=True,
             ), ""
         except Exception as exc:
             self.db.rollback()
             return None, str(exc)
 
-    def _itinvent(self, card: BlockingCard | None, error: str) -> dict[str, object]:
+    def _itinvent(self, card: BlockingCard | None, error: str) -> dict[str, str]:
         if card is None:
             return self._row("IT Invent", "Не проверено", state="warning", note=error)
         if card.itinvent_state in {"found", "stale"} and card.itinvent is not None:
@@ -222,16 +217,14 @@ class DismissalDetailsService:
                 note = " · ".join(
                     part for part in (note, f"Проверено {card.itinvent_checked_at}") if part
                 )
-            return {
-                **self._row(
-                    "IT Invent", value,
-                    state="success" if count else "neutral", note=note,
-                ),
-                "equipment_count": count,
-                "equipment_stale": card.itinvent_state == "stale",
-            }
+            return self._row(
+                "IT Invent",
+                value,
+                state="success" if count else "neutral",
+                note=note,
+            )
         if card.itinvent_state == "owner_not_found":
-            return {**self._row("IT Invent", "Отсутствует"), "equipment_count": 0}
+            return self._row("IT Invent", "Отсутствует")
         if card.itinvent_state == "not_configured":
             return self._row("IT Invent", "Не настроено")
         if card.itinvent_state == "no_login":
@@ -384,15 +377,6 @@ class DismissalDetailsService:
             candidate["effective_block_date"].strftime("%d.%m.%Y")
             + " 19:10"
         )
-        now = datetime.now(ZoneInfo(self.settings.app_timezone))
-        if (run is None or run.status in {"pending", "running", "partial"}) and candidate["effective_block_date"] <= now.date():
-            wait_reason = self._blocking_wait_reason(now, candidate["effective_block_date"])
-            if wait_reason:
-                value, note = wait_reason
-                return self._row(
-                    "Автоблокировка при увольнении", value, state="warning",
-                    note=f"Плановая дата: {planned}. {note}",
-                )
         if run is None:
             return self._row(
                 "Автоблокировка при увольнении",
@@ -423,33 +407,6 @@ class DismissalDetailsService:
             ),
             note=(run.last_error or "").strip(),
         )
-
-    def _blocking_wait_reason(self, now: datetime, effective_date: date | None = None) -> tuple[str, str] | None:
-        if getattr(self.settings, "dry_run", False):
-            return "Автоматика отключена", "Включён безопасный режим DRY_RUN"
-        importing = running_import(self.db)
-        if importing is not None:
-            return (
-                "Ожидает завершения импорта 1С",
-                f"Импорт #{importing.id}, источник {importing.source_id or 'основной'}, "
-                f"начат {self._format_datetime(importing.started_at)}",
-            )
-        if effective_date == now.date() and not is_block_window_open(now):
-            return "Ожидает вечернего окна", f"Следующая проверка условий — сегодня после {BLOCK_TIME_LABEL}"
-        sources = list(self.db.scalars(select(OneCAdditionalSource).where(
-            OneCAdditionalSource.enabled.is_(True),
-        ).order_by(OneCAdditionalSource.id)))
-        if not sources:
-            return "Ожидает кадровые источники", "Нет включённых источников для контрольной проверки"
-        freshness = OneCSourceFreshnessService(self.settings, self.db)
-        reasons = []
-        for source in sources:
-            state = freshness.source_state(source, expected_date=now.date())
-            if not state.ready:
-                reasons.append(f"{source.name or source.source_id}: {state.reason}")
-        if reasons:
-            return "Ожидает контрольной выгрузки 1С", "; ".join(reasons)
-        return None
 
     def build(self, candidate: dict) -> dict:
         card, card_error = self._blocking_card(candidate["worker_key"])

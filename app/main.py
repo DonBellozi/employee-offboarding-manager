@@ -10,7 +10,6 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.config import get_settings
 from app.db import Base, SessionLocal, engine, ensure_compatibility_schema
 from app.routers import (
-    account_requirement,
     admin,
     auth,
     employees,
@@ -34,15 +33,11 @@ from app.routers import (
 )
 from app.security import CSRFMismatchError, ensure_bootstrap_admin
 from app.services.blocking_worker import BlockingQueueWorker
-from app.services.blocking_directory import BlockingDirectoryWorker
-from app.services.zimbra_primary_transition import ZimbraPrimaryTransitionWorker
-from app.services.account_requirement_worker import AccountRequirementWorker
 from app.services.dismissal_notifications import DismissalNotificationWorker
 from app.services.dismissal_details_cache import DismissalDetailsSnapshotWorker
 from app.services.final_dismissal_lifecycle import FinalDismissalLifecycleWorker
 from app.services.onec_scheduler import OneCAutoImportScheduler
 from app.services.onec_sources import OneCSourceRegistryService
-from app.services.onec_import_recovery import recover_interrupted_imports
 from app.services.synology_scheduler import SynologyLifecycleScheduler
 from app.services.telegram_worker import TelegramNotificationWorker
 from app.services.techexpert_lifecycle import TechExpertLifecycleWorker
@@ -66,7 +61,6 @@ async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     ensure_compatibility_schema()
     with SessionLocal() as db:
-        recover_interrupted_imports(db)
         source_registry = OneCSourceRegistryService(settings, db)
         source_registry.ensure_primary()
         source_registry.apply_primary_to_settings()
@@ -76,8 +70,6 @@ async def lifespan(_: FastAPI):
 
     onec_scheduler = OneCAutoImportScheduler(settings, SessionLocal)
     blocking_worker = BlockingQueueWorker(settings, SessionLocal)
-    blocking_directory_worker = BlockingDirectoryWorker(settings, SessionLocal)
-    zimbra_transition_worker = ZimbraPrimaryTransitionWorker(settings, SessionLocal)
     dismissal_notification_worker = DismissalNotificationWorker(
         settings,
         SessionLocal,
@@ -105,11 +97,8 @@ async def lifespan(_: FastAPI):
         SessionLocal,
     )
     techexpert_worker = TechExpertLifecycleWorker(settings, SessionLocal)
-    account_requirement_worker = AccountRequirementWorker(settings, SessionLocal)
     onec_scheduler.start()
     blocking_worker.start()
-    blocking_directory_worker.start()
-    zimbra_transition_worker.start()
     dismissal_notification_worker.start()
     dismissal_details_worker.start()
     final_dismissal_worker.start()
@@ -119,13 +108,9 @@ async def lifespan(_: FastAPI):
     zimbra_mail_cleanup_scheduler.start()
     zimbra_employment_worker.start()
     techexpert_worker.start()
-    account_requirement_worker.start()
     try:
         yield
     finally:
-        zimbra_transition_worker.stop()
-        blocking_directory_worker.stop()
-        account_requirement_worker.stop()
         techexpert_worker.stop()
         zimbra_employment_worker.stop()
         zimbra_mail_cleanup_scheduler.stop()
@@ -150,7 +135,6 @@ app.add_middleware(
 )
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(auth.router)
-app.include_router(account_requirement.router)
 app.include_router(hr_registry_multisource.router)
 app.include_router(hr_registry_alias.router)
 app.include_router(hr_registry_mapping.router)
