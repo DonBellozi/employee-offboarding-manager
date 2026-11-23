@@ -4,9 +4,11 @@ import json
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import pytest
 from fastapi import FastAPI
+from starlette.requests import Request
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -19,7 +21,28 @@ from app.security import CurrentUser
 from app.services.dismissal_details import DismissalDetailsService
 from app.services.dismissal_details_cache import DismissalDetailsCacheService
 from app.services.upcoming_dismissals import UpcomingDismissalService
-from test_account_requirement import ASGIClient
+
+
+class TemplateClient:
+    """Render registered handlers without HTTP sockets or extra dependencies."""
+
+    def __init__(self, app, db, settings):
+        self.app = app
+        self.db = db
+        self.settings = settings
+
+    def get(self, url):
+        parts = urlsplit(url)
+        request = Request({
+            "type": "http", "method": "GET", "scheme": "http", "path": parts.path,
+            "query_string": parts.query.encode(), "root_path": "",
+            "client": ("test", 1), "server": ("test", 80), "app": self.app,
+            "router": self.app.router, "session": {"csrf": "token"},
+            "headers": [(b"host", b"test")],
+        })
+        route = next(item for item in ui.router.routes if item.path == parts.path)
+        response = route.endpoint(request, db=self.db, settings=self.settings)
+        return SimpleNamespace(status_code=response.status_code, text=response.body.decode())
 
 
 SETTINGS = SimpleNamespace(app_timezone="UTC", dry_run=False)
@@ -204,7 +227,7 @@ def test_dashboard_and_periodic_fragment_include_indicator_and_escaped_tooltip(d
     monkeypatch.setattr(UpcomingDismissalService, "list_upcoming", lambda self, **kwargs: [person])
     monkeypatch.setattr(ui.EmployeeArrivalService, "list_pending", lambda self, **kwargs: [])
     monkeypatch.setattr(ui, "_journal_items", lambda *args, **kwargs: [])
-    client = ASGIClient(app)
+    client = TemplateClient(app, db, SETTINGS)
     with patch.object(DismissalDetailsService, "build", side_effect=AssertionError("No remote checks")):
         response = client.get(url)
     assert response.status_code == 200
