@@ -15,11 +15,21 @@ from app.services.ad import (
     wait_for_reactivated_user,
 )
 from app.services.personnel_structure import PersonnelStructureService
+from app.services.onec_import_recovery import running_import
 from app.services.techexpert_access import normalize_email, normalize_fio
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+INACTIVE_AD_MESSAGE = (
+    "Работник больше не активен в кадровых данных. Восстановление AD запрещено."
+)
+
+
+class ADReactivationNoLongerRequired(ValueError):
+    """The HR return was withdrawn; no operator action or directory write is needed."""
 
 
 class ADReactivationAlertService:
@@ -33,18 +43,50 @@ class ADReactivationAlertService:
         alert = self.db.get(ADReactivationAlert, int(alert_id))
         if alert is None:
             raise LookupError("Предупреждение AD не найдено")
+        if alert.status == "resolved" and alert.resolution == "inactive_again":
+            raise ADReactivationNoLongerRequired(INACTIVE_AD_MESSAGE)
         if alert.status != "open":
             raise ValueError("По этому предупреждению уже принято решение")
         return alert
 
     def _require_active(self, alert: ADReactivationAlert) -> None:
+        self.db.expire_all()
+        if running_import(self.db) is not None:
+            raise ValueError("Дождитесь завершения кадрового импорта перед восстановлением AD")
         if not PersonnelStructureService(self.db).active_anywhere(
             alert.worker_key
         ):
-            raise ValueError(
-                "Работник больше не активен в кадровых данных. "
-                "Восстановление AD запрещено."
-            )
+            self._resolve_inactive(alert)
+            self.db.commit()
+            raise ADReactivationNoLongerRequired(INACTIVE_AD_MESSAGE)
+
+    def _resolve_inactive(self, alert: ADReactivationAlert) -> None:
+        if alert.status != "open":
+            return
+        now = utcnow()
+        alert.status = "resolved"
+        alert.resolution = "inactive_again"
+        alert.resolved_by = "system"
+        alert.resolved_at = now
+        alert.last_error = ""
+        alert.updated_at = now
+        self._audit(alert, actor="system", action="ad_reactivation_cancelled", result="cancelled")
+
+    def close_inactive_alerts(self) -> int:
+        """Close obsolete work using local HR data, including legacy/orphan alerts."""
+        if running_import(self.db) is not None:
+            return 0
+        personnel = PersonnelStructureService(self.db)
+        closed = 0
+        for alert in self.db.scalars(select(ADReactivationAlert).where(
+            ADReactivationAlert.status == "open",
+        )).all():
+            if not personnel.active_anywhere(alert.worker_key):
+                self._resolve_inactive(alert)
+                closed += 1
+        if closed:
+            self.db.commit()
+        return closed
 
     def _audit(
         self,
@@ -254,6 +296,8 @@ class ADReactivationAlertService:
         actor: str,
         candidate_count: int,
     ) -> ADReactivationAlert:
+        # Discovery can take time. Re-read HR immediately before an AD write.
+        self._require_active(alert)
         try:
             if self.settings.dry_run:
                 self._audit(

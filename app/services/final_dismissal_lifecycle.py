@@ -24,7 +24,10 @@ from app.models_dismissal_lifecycle import (
     FinalDismissalBlockTarget,
 )
 from app.services.ad import ActiveDirectoryService
-from app.services.ad_reactivation_alerts import ADReactivationAlertService
+from app.services.ad_reactivation_alerts import (
+    ADReactivationAlertService,
+    ADReactivationNoLongerRequired,
+)
 from app.services.hr_registry import (
     reconciliation_status_for,
     worker_requires_active_accounts,
@@ -1279,6 +1282,9 @@ class FinalDismissalLifecycleService:
 
     def _create_reactivation_alerts(self) -> None:
         """Восстановить недавний возврат или передать решение оператору."""
+        if self._import_running():
+            return
+        ADReactivationAlertService(self.settings, self.db).close_inactive_alerts()
         personnel = PersonnelStructureService(self.db)
         completed_ad_targets = list(
             self.db.execute(
@@ -1307,13 +1313,6 @@ class FinalDismissalLifecycleService:
                 )
             )
             if not personnel.active_anywhere(run.worker_key):
-                if alert is not None and alert.status == "open":
-                    alert.status = "resolved"
-                    alert.resolution = "inactive_again"
-                    alert.resolved_by = "system"
-                    alert.resolved_at = utcnow()
-                    alert.last_error = ""
-                    alert.updated_at = utcnow()
                 continue
             if alert is None:
                 alert = ADReactivationAlert(
@@ -1340,7 +1339,16 @@ class FinalDismissalLifecycleService:
             elif alert.status != "open":
                 # Решение оператора действует для конкретного эпизода
                 # увольнения и не сбрасывается каждым фоновым циклом.
-                continue
+                if alert.resolution != "inactive_again":
+                    continue
+                # A later confirmed return is a new reason to check AD.
+                alert.status = "open"
+                alert.resolution = ""
+                alert.resolved_by = ""
+                alert.resolved_at = None
+                alert.last_error = ""
+                alert.candidates_json = "[]"
+                alert.last_checked_at = None
             alert.fio = run.fio
             alert.dismissal_date = run.dismissal_date
             if not alert.ad_login:
@@ -1371,6 +1379,9 @@ class FinalDismissalLifecycleService:
                     self.settings,
                     self.db,
                 ).restore(alert_id=alert_id, actor="system")
+            except ADReactivationNoLongerRequired:
+                # HR changed during discovery; obsolete work is already closed.
+                continue
             except Exception:
                 # Ошибка уже сохранена в предупреждении и будет показана
                 # оператору. Остальные возвраты должны продолжить обработку.

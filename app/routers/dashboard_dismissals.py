@@ -46,7 +46,11 @@ from app.security import (
     require_operator,
     validate_csrf,
 )
-from app.services.ad_reactivation_alerts import ADReactivationAlertService
+from app.services.ad_reactivation_alerts import (
+    ADReactivationAlertService,
+    ADReactivationNoLongerRequired,
+    INACTIVE_AD_MESSAGE,
+)
 from app.services.upcoming_dismissals import (
     DEFERRAL_ACTION,
     UpcomingDismissalService,
@@ -1320,6 +1324,9 @@ def dashboard(
 ):
     get_current_user(request)
     dismissal_error = request.query_params.get("dismissal_error", "")
+    attention_error = request.query_params.get("attention_error", "")
+    if attention_error == INACTIVE_AD_MESSAGE:
+        attention_error = ""
     upcoming_service = UpcomingDismissalService(settings, db)
     dashboard_today = upcoming_service.today
     try:
@@ -1338,6 +1345,7 @@ def dashboard(
         new_employee_groups = []
         employee_error = str(exc)
 
+    ADReactivationAlertService(settings, db).close_inactive_alerts()
     ad_reactivation_alerts = list(
         db.scalars(
             select(ADReactivationAlert)
@@ -1410,10 +1418,7 @@ def dashboard(
                 "attention_message",
                 "",
             ),
-            attention_error=request.query_params.get(
-                "attention_error",
-                "",
-            ),
+            attention_error=attention_error,
             upcoming_dismissals=upcoming,
             dismissal_message=request.query_params.get(
                 "dismissal_message",
@@ -1482,6 +1487,8 @@ def refresh_reactivated_ad(
             f"/?attention_message={quote_plus(message)}#operator-attention",
             status_code=303,
         )
+    except ADReactivationNoLongerRequired:
+        return RedirectResponse("/", status_code=303)
     except Exception as exc:
         db.rollback()
         return RedirectResponse(
@@ -1514,6 +1521,8 @@ def restore_reactivated_ad(
             f"/?attention_message={quote_plus(message)}#operator-attention",
             status_code=303,
         )
+    except ADReactivationNoLongerRequired:
+        return RedirectResponse("/", status_code=303)
     except Exception as exc:
         db.rollback()
         return RedirectResponse(
@@ -1553,6 +1562,8 @@ def restore_reactivated_ad_candidate(
             f"/?attention_message={quote_plus(message)}#operator-attention",
             status_code=303,
         )
+    except ADReactivationNoLongerRequired:
+        return RedirectResponse("/", status_code=303)
     except Exception as exc:
         db.rollback()
         return RedirectResponse(
