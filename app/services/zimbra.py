@@ -687,12 +687,24 @@ class ZimbraService:
                     zimbra_id = value.strip()
                     break
 
-            mail_values = attrs.get("mail", [])
-            if mail_values:
-                primary_email = mail_values[0].strip().lower()
-
-            if not primary_email and current_name:
-                primary_email = current_name.strip().lower()
+            # zmprov prints Account.getName() in '# name'. LDAP 'mail' is
+            # multivalued and its order does not identify the primary address.
+            primary_email = current_name.strip().lower()
+            if not primary_email:
+                delivery = {value.strip().lower() for value in attrs.get("zimbramaildeliveryaddress", []) if value.strip()}
+                if len(delivery) == 1:
+                    primary_email = next(iter(delivery))
+                elif delivery:
+                    raise RuntimeError('Zimbra вернула несколько основных адресов доставки; требуется проверка')
+                else:
+                    mail = {value.strip().lower() for value in attrs.get("mail", []) if value.strip()}
+                    if len(mail) == 1:
+                        primary_email = next(iter(mail))
+                    elif mail and zimbra_id:
+                        raise RuntimeError('Zimbra не подтвердила основной адрес ящика; порядок mail не определяет основной адрес')
+            if zimbra_id and (primary_email.count('@') != 1 or not all(primary_email.split('@'))
+                              or any(char.isspace() for char in primary_email)):
+                raise RuntimeError('Zimbra вернула ящик без корректного основного адреса; отсутствие учётки не подтверждено')
 
             for key in (
                 "mail",

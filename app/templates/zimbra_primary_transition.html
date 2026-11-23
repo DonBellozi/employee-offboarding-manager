@@ -49,17 +49,17 @@
   {% if not job or job.status not in ['running', 'completed'] %}
   <details data-manual-transition{% if manual or error or manual_email != action.replacement_address or manual_login %} open{% endif %}>
     <summary>Уже изменено вручную</summary>
-    <p class="muted">Укажите действующий ящик. Если изменился логин AD, укажите его тоже; пустое поле сохраняет прежнее сопоставление AD.</p>
+    <p class="muted">Ящик можно найти по основному адресу или alias. Система покажет фактический основной адрес. Если изменился логин AD, укажите его тоже; пустое поле сохраняет прежнее сопоставление AD.</p>
     <form method="post" action="/zimbra-transitions/{{ action.id }}/manual" class="stack">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="hidden" name="operation" value="inspect">
-      <label>Основной адрес действующего ящика<input type="email" name="email" value="{{ manual_email }}" maxlength="320" required></label>
+      <label>Адрес действующего ящика<input type="email" name="email" value="{{ manual_email }}" maxlength="320" required></label>
       <label>Логин AD, если менялся<input name="ad_login" value="{{ manual_login }}" maxlength="128"></label>
       <button class="button secondary" type="submit">Проверить сопоставление</button>
     </form>
     {% if manual %}
     <dl class="blocking-details">
-      <dt>Почта</dt><dd>{{ manual.identity.primary_email }} — активна</dd>
+      <dt>Основной адрес</dt><dd>{{ manual.identity.primary_email }} — активна</dd>
       <dt>Прежний адрес</dt><dd>Отсутствует</dd>
       <dt>AD</dt><dd>{{ manual.ad_user.username ~ ' — активна' if manual.ad_user else 'Сопоставление сохраняется' }}</dd>
     </dl>

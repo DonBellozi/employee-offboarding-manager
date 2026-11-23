@@ -259,3 +259,67 @@ def test_retry_cannot_race_with_manual_approval_or_requeue_approved_job(case):
     confirm(case)
     with pytest.raises(ValueError):case.service.retry(case.action.id,'operator')
     assert job.status=='completed'
+
+
+def test_alias_preview_shows_primary_and_submits_canonical_address(case):
+    manually_changed(case)
+    checked=case.service.inspect_manual(case.action.id,OTHER)
+    assert checked['identity'].primary_email==NEW and checked['new_source']=='new.test'
+    response=routes.transition_manual(case.action.id,request(),csrf='token',email=OTHER,ad_login='',operation='inspect',
+        settings=case.settings,db=case.db)
+    body=response.body.decode()
+    assert response.status_code==200 and 'Утвердить в системе' in body
+    assert f'name="email" value="{NEW}"' in body
+    result=routes.transition_manual(case.action.id,request(),csrf='token',email=NEW,ad_login='',operation='confirm',
+        expected_id='z-1',expected_guid='',confirmed='true',settings=case.settings,db=case.db)
+    assert result.status_code==303 and case.service.job(case.action.id).new_address==NEW
+    assert case.mail.calls==[]
+
+
+def test_later_primary_change_cannot_be_approved_through_stale_alias(case):
+    manually_changed(case)
+    case.service.inspect_manual(case.action.id,NEW)
+    case.mail.primary='different@new.test'
+    case.mail.addresses.add(case.mail.primary)
+    with pytest.raises(ValueError,match='Основной адрес изменился после проверки'):
+        confirm(case)
+    assert case.service.job(case.action.id) is None and not case.db.scalar(select(EmailLoginMapping))
+
+
+def test_ended_company_address_left_as_alias_still_needs_removal(case):
+    manually_changed(case)
+    case.mail.addresses.add(OLD)
+    with pytest.raises(ValueError,match='Прежний адрес ещё существует'):
+        case.service.inspect_manual(case.action.id,OLD)
+    assert case.mail.calls==[]
+
+
+def test_manual_preview_uses_real_parser_after_primary_and_alias_swap(case,monkeypatch):
+    from app.services.zimbra import ZimbraService
+    service=ZimbraService(case.settings)
+    monkeypatch.setattr(service,'_client',Mock())
+    output=f'# name {NEW}\nzimbraId: z-1\nmail: {OTHER}\nmail: {NEW}\nzimbraMailAlias: {OTHER}\nzimbraMailDeliveryAddress: {NEW}\nzimbraAccountStatus: active'
+    def execute(client,args):
+        return '' if OLD in args[2] else output
+    monkeypatch.setattr(service,'_execute_zmprov_lookup',execute)
+    monkeypatch.setattr(module,'ZimbraService',lambda settings:service)
+    response=routes.transition_manual(case.action.id,request(),csrf='token',email=NEW,ad_login='',operation='inspect',
+        settings=case.settings,db=case.db)
+    assert response.status_code==200 and 'Утвердить в системе' in response.body.decode()
+    confirm(case)
+    assert case.service.job(case.action.id).new_address==NEW
+    assert case.mail.calls==[]
+
+
+def test_renamed_mailbox_requires_only_old_alias_removal_not_another_primary_swap(case):
+    from app.services.zimbra import ZimbraService
+    account=ZimbraService._parse_search_accounts(
+        f'# name {NEW}\nzimbraId: z-1\nmail: {OLD}\nmail: {NEW}\nzimbraMailAlias: {OLD}\nzimbraAccountStatus: active')[0]
+    case.mail.primary=account.primary_email
+    case.mail.addresses=set(account.addresses)
+    case.mail.remove_alias=lambda primary,alias:case.mail.remove_alias_by_id('z-1',alias)
+    case.db.get(ZimbraLifecycleSettings,1).allow_alias_remove=True;case.db.commit()
+    specs=case.service.employment._current_specs(worker_key='worker')
+    assert len(specs)==1 and specs[0].action=='remove_alias' and specs[0].target_address==OLD
+    assert case.service.employment.process()['completed']==1
+    assert case.mail.primary==NEW and case.mail.calls==[('remove',OLD)]

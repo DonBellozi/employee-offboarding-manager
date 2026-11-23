@@ -87,13 +87,16 @@ class ZimbraPrimaryTransitionService:
         action, states, records, mappings = self._manual_context(action_id)
         email = normalize(email)
         if email.count('@') != 1 or any(c.isspace() for c in email) or len(email) > 320:
-            raise ValueError('Укажите действующий основной адрес почты')
+            raise ValueError('Укажите основной или дополнительный адрес действующего ящика')
         service = ZimbraService(self.settings)
         identity = service.account_by_address(email)
         if identity is None or not identity.zimbra_id or normalize(identity.account_status) != 'active':
             raise ValueError('Действующий ящик Zimbra не найден или неактивен')
-        if normalize(identity.primary_email) != email:
-            raise ValueError(f'Это дополнительный адрес. Укажите основной адрес: {identity.primary_email}')
+        if email not in self._addresses(identity):
+            raise ValueError('Zimbra не подтвердила связь введённого адреса с найденным ящиком')
+        email = normalize(identity.primary_email)
+        if email.count('@') != 1 or not all(email.split('@')) or any(c.isspace() for c in email):
+            raise ValueError('Zimbra не вернула корректный основной адрес ящика')
         related = [m for m in mappings if normalize(m.zimbra_id) == normalize(identity.zimbra_id)
                    or self._addresses(identity) & {normalize(m.source_email), normalize(m.zimbra_email)}]
         sources = self.employment._address_sources_for_mailbox(identity=identity, mappings=related, states=states, records=records)
@@ -151,6 +154,10 @@ class ZimbraPrimaryTransitionService:
         try:
             checked = self.inspect_manual(action_id, email, ad_login)
             identity, ad_user = checked['identity'], checked['ad_user']
+            # The preview resolves an alias and submits the actual primary.
+            # Do not approve a later primary change solely because the GUID is unchanged.
+            if normalize(identity.primary_email) != normalize(email):
+                raise ValueError('Основной адрес изменился после проверки. Проверьте сопоставление заново')
             if (normalize(identity.zimbra_id) != normalize(expected_id)
                     or normalize(ad_user.object_guid if ad_user else '') != normalize(expected_guid)):
                 raise ValueError('Учётки изменились после проверки. Проверьте заново')
